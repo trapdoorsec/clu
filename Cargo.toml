@@ -1,0 +1,16 @@
+[package]
+name = "clu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.53", features = ["derive", "color", "cargo"] }
+tokio = "1.48.0"
+reqwest = "0.12.28"
+serde_json = "1.0.148"
+levenshtein = "1.0.5"
+ollama-rs = "0.3.3"
+url = "2.5.7"
+clap-cargo = "0.18.3"
+rss = "2.0.12"
+http = "1.4.0"
