@@ -1,0 +1,30 @@
+[[rules]]
+name = "suspicious_keywords"
+type = "keyword"
+location = "description"
+keywords = ["malicious", "backdoor", "stealer", "cryptominer"]
+risk_score = 75
+description = "Contains suspicious keywords"
+
+[[rules]]
+name = "eval_base64_found"
+type = "regex"
+location = "description"
+pattern = "eval\\(.*base64|exec\\(.*decode"
+risk_score = 90
+description = "Potential code obfuscation detected"
+
+[[rules]]
+name = "missing_author"
+type = "metadata"
+field = "author"
+check = "is_none"
+risk_score = 30
+description = "Package has no author information"
+
+[[rules]]
+name = "fake_author"
+type = "metadata"
+field = "author"
+pattern = ".*example[.]com"
+description = "Package author uses fake author"

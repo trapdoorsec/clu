@@ -1,7 +1,7 @@
 pub(crate) struct PythonPackage {
-    pub title: String,
-    pub link: String,
-    pub description: String,
-    pub published_date: Date,
+    pub title: Option<String>,
+    pub link: Option<String>,
+    pub description: Option<String>,
+    pub published_date: Option<String>,
     pub author: Option<String>,
 }
