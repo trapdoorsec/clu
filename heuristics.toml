@@ -1,7 +1,7 @@
 [[rules]]
 name = "suspicious_keywords"
 type = "keyword"
-location = "description"
+field = "description"
 keywords = ["malicious", "backdoor", "stealer", "cryptominer"]
 risk_score = 75
 description = "Contains suspicious keywords"
@@ -9,7 +9,7 @@ description = "Contains suspicious keywords"
 [[rules]]
 name = "eval_base64_found"
 type = "regex"
-location = "description"
+field = "description"
 pattern = "eval\\(.*base64|exec\\(.*decode"
 risk_score = 90
 description = "Potential code obfuscation detected"
@@ -24,7 +24,80 @@ description = "Package has no author information"
 
 [[rules]]
 name = "fake_author"
-type = "metadata"
+type = "regex"
 field = "author"
-pattern = ".*example[.]com"
-description = "Package author uses fake author"
+pattern = ".*example\\.com"
+risk_score = 40
+description = "Package author uses fake/example email"
+
+# Network indicators
+[[rules]]
+name = "ip_address_in_description"
+type = "regex"
+field = "description"
+pattern = "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b"
+risk_score = 60
+description = "Contains hardcoded IP address"
+
+# Crypto wallet addresses
+[[rules]]
+name = "bitcoin_address"
+type = "regex"
+field = "description"
+pattern = "\\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\\b|bc1[a-z0-9]{39,59}\\b"
+risk_score = 85
+description = "Contains Bitcoin wallet address"
+
+# Obfuscation patterns
+[[rules]]
+name = "hex_encoded_payload"
+type = "regex"
+field = "description"
+pattern = "\\\\x[0-9a-fA-F]{2}"
+risk_score = 70
+description = "Contains hex-encoded data (possible obfuscation)"
+
+# Test/temporary packages
+[[rules]]
+name = "test_package_name"
+type = "keyword"
+field = "title"
+keywords = ["test", "temp", "demo", "sample", "tryout", "experiment"]
+risk_score = 40
+description = "Package name suggests test/temporary package"
+
+# Suspicious system operations
+[[rules]]
+name = "dangerous_operations"
+type = "keyword"
+field = "description"
+keywords = ["rootkit", "keylog", "password steal", "credential dump", "reverse shell"]
+risk_score = 95
+description = "Description mentions dangerous operations"
+
+# Missing description
+[[rules]]
+name = "missing_description"
+type = "metadata"
+field = "description"
+check = "is_none"
+risk_score = 35
+description = "Package has no description"
+
+# Suspicious URLs
+[[rules]]
+name = "pastebin_urls"
+type = "regex"
+field = "description"
+pattern = "pastebin\\.com|hastebin\\.com|ghostbin\\.com"
+risk_score = 65
+description = "Links to paste sites (common for C2)"
+
+# Unicode obfuscation
+[[rules]]
+name = "unicode_homoglyphs"
+type = "regex"
+field = "title"
+pattern = "[а-яА-Я]"  # Cyrillic characters
+risk_score = 80
+description = "Package name contains Cyrillic characters (possible typosquat)"

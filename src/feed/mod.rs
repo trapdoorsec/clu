@@ -1,6 +1,5 @@
 pub mod pypi;
 use pypi::PythonPackage;
-use reqwest;
 use rss::Channel;
 use std::error::Error;
 use url::Url;

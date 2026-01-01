@@ -1,2 +1,2 @@
-mod heuristics;
-
+pub mod heuristics;
+pub mod typosquat;
