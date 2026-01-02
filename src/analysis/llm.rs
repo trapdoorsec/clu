@@ -1,10 +1,11 @@
 use ollama_rs::Ollama;
 use ollama_rs::generation::completion::request::GenerationRequest;
 use std::error::Error;
+use serde::Serialize;
 use crate::config::LlmConfig;
 
 /// Result from LLM analysis
-#[derive(Debug, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct LlmAnalysisResult {
     pub is_malicious: bool,
     pub risk_score: u8,
@@ -13,7 +14,7 @@ pub struct LlmAnalysisResult {
 }
 
 /// Result from sentinel prompt injection detection
-#[derive(Debug, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct PromptInjectionDetection {
     pub injection_detected: bool,
     pub confidence: f32,

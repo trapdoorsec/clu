@@ -1,7 +1,7 @@
 use crate::config::{Config, FeedConfig};
 use crate::feed::pypi::PythonPackage;
 use levenshtein::levenshtein;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 
 #[derive(Debug, Deserialize)]
@@ -18,6 +18,7 @@ struct PackageRow {
     project: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
 pub struct TypoSquatterMatch {
     pub rule_name: String,
     pub risk_score: u8,

@@ -1,11 +1,11 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::process::Command;
 use std::time::Duration;
 use tokio::time::timeout;
 
 /// Result from GuardDog analysis
-#[derive(Debug, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GuardDogResult {
     pub is_malicious: bool,
     pub risk_score: u8,
@@ -13,7 +13,7 @@ pub struct GuardDogResult {
 }
 
 /// Individual finding from GuardDog
-#[derive(Debug, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GuardDogFinding {
     pub rule_name: String,
     pub severity: String,

@@ -1,9 +1,10 @@
 use crate::feed;
 use feed::pypi::PythonPackage;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 
+#[derive(Debug, Serialize)]
 pub struct HeuristicMatch {
     pub rule_name: String,
     pub risk_score: u8,
