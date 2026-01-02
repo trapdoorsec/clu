@@ -1,6 +1,9 @@
 use clap::{ArgMatches, Parser};
 use clap::{arg, command};
 
+use crate::analysis::heuristics;
+use crate::config::Config;
+
 // modules
 mod analysis;
 mod cli;
@@ -35,7 +38,9 @@ fn handle_unknown() {
 }
 
 fn handle_scan(_: &ArgMatches) {
-    todo!()
+    let _config = Config::load("config.toml");
+    let _ = heuristics::validate_heuristics_file("heuristics.toml");
+    todo!("Implement scan logic")
 }
 
 fn handle_watch(_: &ArgMatches) {
