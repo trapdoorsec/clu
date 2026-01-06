@@ -12,12 +12,32 @@ pub async fn fetch_rss(url: &Url) -> Result<Channel, Box<dyn Error>> {
     Ok(channel)
 }
 
+/// Extract package name from PyPI RSS title
+/// Format: "packageName added to PyPI" or "packageName updated on PyPI"
+fn extract_package_name(title: &str) -> String {
+    // Split on common PyPI RSS patterns
+    if let Some(pos) = title.find(" added to PyPI") {
+        title[..pos].trim().to_string()
+    } else if let Some(pos) = title.find(" updated on PyPI") {
+        title[..pos].trim().to_string()
+    } else if let Some(pos) = title.find(" added to") {
+        title[..pos].trim().to_string()
+    } else if let Some(pos) = title.find(" updated") {
+        title[..pos].trim().to_string()
+    } else {
+        // Fallback: use as-is if format is unexpected
+        title.trim().to_string()
+    }
+}
+
 pub async fn serialize_packages(channel: Channel) -> Option<Vec<PythonPackage>> {
     let mut packages = Vec::new();
     for i in channel.items {
         let i_clone = i.clone();
+        // Parse title to extract just the package name
+        let parsed_title = i_clone.title.as_ref().map(|t| extract_package_name(t));
         let p = PythonPackage {
-            title: i_clone.title,
+            title: parsed_title,
             link: i_clone.link,
             description: i.description().map(|s| s.to_string()),
             author: i.author().map(|s| s.to_string()),

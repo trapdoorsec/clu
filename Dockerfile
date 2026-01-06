@@ -30,12 +30,8 @@ RUN apt-get update && apt-get install -y \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Ollama
-RUN curl -fsSL https://ollama.ai/install.sh | sh
-
 # Create non-root user for security
 RUN useradd -m -u 1000 -s /bin/bash cluuser && \
-    mkdir -p /home/cluuser/.ollama && \
     chown -R cluuser:cluuser /home/cluuser
 
 # Switch to non-root user
@@ -57,9 +53,6 @@ RUN mkdir -p /home/cluuser/config
 
 # Set working directory
 WORKDIR /home/cluuser/config
-
-# Expose Ollama port (for model management)
-EXPOSE 11434
 
 # Default command shows help
 CMD ["clu", "--help"]
