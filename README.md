@@ -7,12 +7,28 @@ Malicious PyPI package hunter. Monitors the PyPI feed for new packages, runs heu
 ## How it works
 
 ```
-PyPI feed -> Heuristics (typosquat, metadata) -> LLM analysis -> GuardDog -> Alerts
+PyPI feed
+    ↓
+Stage 1: Heuristics (fast metadata analysis)
+    ↓
+Stage 2: Typosquat (package name similarity)
+    ↓
+[Optionally, if enabled:]
+    ├→ Stage 3: GuardDog (pattern-based code scanning)
+    └→ Stage 4: LLM Analysis (semantic AI-based review with injection detection)
+    ↓
+Results → Webhook (Slack) + Log Aggregator (ELK/Splunk/CloudWatch)
 ```
 
-**Tier 1**: Fast Rust-based checks (Levenshtein distance, regex patterns, metadata red flags)
-**Tier 2**: Local LLM review for flagged packages (Qwen2.5-Coder via Ollama)
-**Tier 3**: GuardDog confirmation (Semgrep rules)
+**Stage 1 & 2**: Always enabled by default (fast, ~ms to 100ms)
+- Heuristics: Regex/keyword matching on package metadata
+- Typosquat: Levenshtein distance against popular packages
+
+**Stage 3 & 4**: Optional (slower, ~seconds each)
+- GuardDog: Pattern-based code scanning (requires guarddog CLI)
+- LLM: Semantic analysis with prompt injection detection (requires Ollama)
+
+**Results**: Ephemeral by design - sent immediately to webhook & logging services
 
 ## Quick Start with Docker (Recommended)
 
@@ -21,6 +37,7 @@ PyPI feed -> Heuristics (typosquat, metadata) -> LLM analysis -> GuardDog -> Ale
 - Docker 20.10+
 - Docker Compose 2.0+
 - 4GB+ available memory
+- Webhook URL for receiving results (Slack, custom endpoint, etc.)
 
 ### Setup
 
@@ -32,31 +49,58 @@ cd clu
 # 2. Create initial config (generates config.toml interactively)
 docker-compose run --rm clu clu init
 
+# During setup, you'll be prompted for:
+# - PyPI feed endpoint
+# - Ollama endpoint (if using LLM analysis)
+# - Webhook URL for alerts (REQUIRED - results are ephemeral)
+# - Which analysis stages to enable
+
 # 3. Start the service
 docker-compose up -d
 
-# 4. View logs
+# 4. View real-time analysis logs
 docker-compose logs -f clu
+
+# 5. Check that Ollama model loaded (if LLM enabled)
+docker-compose logs ollama | grep "model loaded"
+```
+
+**⚠️ Important**: Configure webhook in `config.toml` or results will be lost!
+
+```toml
+[output]
+webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 ```
 
 ### Docker Usage
 
 ```bash
-# Watch PyPI feed continuously
+# Start watching PyPI feed
 docker-compose up -d
 
-# View real-time logs
+# View live analysis output
 docker-compose logs -f clu
 
-# Scan a specific package
+# View Ollama logs (model loading, inference)
+docker-compose logs -f ollama
+
+# Scan specific package (once implemented)
 docker-compose exec clu clu scan requests
+
+# Check container is running
+docker-compose ps
 
 # Stop service
 docker-compose down
 
-# Remove all data (including models)
+# Stop and remove everything (including Ollama models)
 docker-compose down -v
 ```
+
+**Note**: Analysis results are ephemeral - they're sent to:
+1. **Webhook** (real-time alerts to Slack, Teams, custom endpoint)
+2. **Docker logs** (available via `docker logs` + log drivers)
+3. **Log aggregators** (ELK Stack, Splunk, CloudWatch - see STORAGE.md)
 
 ## Security: Running as Non-Root User
 
@@ -74,16 +118,24 @@ docker inspect clu-scanner | grep -i '"user"'
 # Output: "User": "1000:1000"
 ```
 
-### File Permissions
+### Storage & Data Handling
 
-Config files are mounted read-only:
+**Config files are mounted read-only** (security):
 
 ```bash
-# config.toml is read-only
+# Verify config is read-only
 docker-compose exec clu ls -la /home/cluuser/config/
-# -r--r--r-- config.toml  (read-only)
-# drwxr-xr-x data/        (writable for logs/cache)
+# -r--r--r-- config.toml   (RO - can't be modified by container)
+# -r--r--r-- heuristics.toml (RO - rules are immutable)
 ```
+
+**Analysis results are ephemeral** (no disk pollution):
+- Results sent to webhook immediately
+- Logs written to stdout/stderr for Docker log drivers
+- Temp package files auto-cleaned when container stops
+- Ollama models persist in named volume (shared between CLU & Ollama)
+
+See **STORAGE.md** for detailed logging and external service integration.
 
 ### Resource Limits
 
@@ -131,7 +183,7 @@ clu scan requests
 
 ## Configuration
 
-Create `config.toml`:
+The `clu init` command generates `config.toml` interactively. Here's the complete reference:
 
 ```toml
 [feed]
@@ -139,90 +191,94 @@ endpoint = "https://pypi.org/rss/packages.xml"
 poll_interval = "30s"
 check_updates = false
 
-# Popular packages list (for typosquat detection)
+# Popular packages for typosquat detection
 popular_packages_endpoint = "https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.min.json"
 
 [llm]
-endpoint = "http://localhost:11434"  # or http://ollama:11434 in Docker
+# Ollama endpoint (required if llm stage enabled)
+endpoint = "http://ollama:11434"  # In Docker: use service name
 model = "qwen2.5-coder:7b"
 
 [analysis]
-typosquat_distance_threshold = 2
-min_package_length = 4
+typosquat_distance_threshold = 2    # Levenshtein distance for similarity
+min_package_length = 4              # Skip very short package names
 
 [output]
-log_level = "info"
+log_level = "info"                  # debug, info, warn, error
 enable_tui = false
-# webhook = "https://hooks.slack.com/..."  # Optional
+# REQUIRED: Webhook for real-time alerts (results are ephemeral)
+webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 
 [pipeline]
-# Analysis pipeline configuration
-# Each stage can be: "always" (always run), "conditional" (run if risk > threshold), "disabled" (never run)
+# Enable/disable analysis stages (true = enabled, false = disabled)
+# Stages 1 & 2 are fast (enabled by default)
+heuristics = true       # Fast metadata rules
+typosquat = true        # Similarity detection
 
-# Heuristics: Fast metadata analysis (regex patterns, suspicious fields, etc.)
-# Recommended: "always"
-heuristics = "always"
-
-# Typosquat: Levenshtein distance-based package name similarity detection
-# Recommended: "always"
-typosquat = "always"
-
-# GuardDog: Pattern-based code analysis (Semgrep rules for malicious patterns)
-# Recommended: "conditional"
-guarddog = "conditional"
-
-# LLM: Semantic code analysis using LLM for suspicious behavior detection
-# Recommended: "conditional"
-llm = "conditional"
-
-# Risk score threshold (0-100) for triggering conditional stages
-# Packages scoring above this will run conditional analysis stages
-trigger_threshold = 30
+# Stages 3 & 4 are slow (disabled by default, require extra setup)
+guarddog = false        # Requires 'guarddog' CLI tool installed
+llm = false             # Requires Ollama running with model
 ```
 
 ### Pipeline Configuration Guide
 
-The `[pipeline]` section lets you customize which analysis stages run and when:
+Each analysis stage can be enabled (`true`) or disabled (`false`):
 
-| Stage | Description | Recommended | Resource Impact |
-|-------|-------------|-------------|-----------------|
-| **heuristics** | Fast regex/metadata checks | always | Very low |
-| **typosquat** | Levenshtein distance matching against popular packages | always | Low |
-| **guarddog** | Pattern-based code scanning (Semgrep) | conditional | Medium |
-| **llm** | Semantic AI-based code review | conditional | High |
-
-**Trigger Modes:**
-
-- `"always"` - Run this stage on every package
-- `"conditional"` - Only run if risk score from previous stages exceeds `trigger_threshold`
-- `"disabled"` - Skip this stage entirely
+| Stage | Speed | Enabled by Default | Requirements | Notes |
+|-------|-------|---|---|---|
+| **Heuristics** | ~ms | ✅ Yes | None | Fast metadata rules |
+| **Typosquat** | ~100ms | ✅ Yes | Network (external API) | Levenshtein similarity |
+| **GuardDog** | ~1-2s | ❌ No | `guarddog` CLI tool | Pattern-based scanning |
+| **LLM** | ~2-5s | ❌ No | Ollama + model | Semantic analysis + injection detection |
 
 **Example Configurations:**
 
 ```toml
-# Aggressive: Run all stages (slowest, most thorough)
+# Minimum (fast, recommended for production)
 [pipeline]
-heuristics = "always"
-typosquat = "always"
-guarddog = "always"
-llm = "always"
-trigger_threshold = 0
+heuristics = true
+typosquat = true
+guarddog = false
+llm = false
 
-# Balanced: Run deep analysis only on flagged packages (recommended)
+# Balanced (add GuardDog for medium-risk packages)
 [pipeline]
-heuristics = "always"
-typosquat = "always"
-guarddog = "conditional"
-llm = "conditional"
-trigger_threshold = 30
+heuristics = true
+typosquat = true
+guarddog = true
+llm = false
 
-# Fast: Only heuristics and typosquat
+# Maximum (all stages - slowest but most thorough)
 [pipeline]
-heuristics = "always"
-typosquat = "always"
-guarddog = "disabled"
-llm = "disabled"
-trigger_threshold = 100
+heuristics = true
+typosquat = true
+guarddog = true
+llm = true
+```
+
+**To enable GuardDog:**
+```bash
+# 1. Install guarddog (already included in Docker image)
+pip install guarddog
+
+# 2. Enable in config.toml
+[pipeline]
+guarddog = true
+```
+
+**To enable LLM:**
+```bash
+# 1. Make sure Ollama is running
+docker-compose logs ollama | grep "model loaded"
+
+# 2. Enable in config.toml
+[pipeline]
+llm = true
+
+# 3. Configure Ollama endpoint
+[llm]
+endpoint = "http://ollama:11434"
+model = "qwen2.5-coder:7b"
 ```
 
 Create `heuristics.toml`:
@@ -294,34 +350,133 @@ LLM Analysis:
 ### Container won't start
 
 ```bash
-# Check logs
-docker-compose logs clu
+# Check CLU logs
+docker-compose logs clu | head -50
+
+# Check Ollama logs
+docker-compose logs ollama
 
 # Rebuild image
 docker-compose build --no-cache
 ```
 
-### Ollama models not loading
+### No results appearing
+
+**Check webhook is configured:**
+```bash
+# View config
+grep webhook ./config.toml
+# Should show: webhook = "https://..."
+```
+
+**Test webhook connectivity:**
+```bash
+docker-compose exec clu curl -v https://your-webhook-url
+```
+
+**View container logs:**
+```bash
+docker-compose logs clu | grep -i "new package\|webhook\|analysis"
+```
+
+### Ollama model not loading
 
 ```bash
 # Check Ollama service
 docker-compose logs ollama
 
-# Manually pull model
+# Verify model is installed
+docker-compose exec ollama ollama list
+
+# Pull model manually
 docker-compose exec ollama ollama pull qwen2.5-coder:7b
+
+# Wait for it to complete, then restart CLU
+docker-compose restart clu
 ```
 
-### Permission denied errors
+### LLM analysis not running (stage 4)
 
 ```bash
-# Ensure files are readable by UID 1000
-sudo chown -R 1000:1000 ./config.toml ./heuristics.toml
-sudo chmod 644 ./config.toml ./heuristics.toml
+# Check if LLM is enabled
+grep "llm = " ./config.toml  # Should be 'true'
+
+# Check Ollama is healthy
+docker-compose ps | grep ollama  # Should show 'healthy'
+
+# Check CLU can reach Ollama
+docker-compose exec clu curl http://ollama:11434/api/tags
+```
+
+### GuardDog analysis not running (stage 3)
+
+```bash
+# Check if GuardDog is enabled
+grep "guarddog = " ./config.toml  # Should be 'true'
+
+# Check guarddog CLI is available
+docker-compose exec clu which guarddog
+
+# Verify guarddog can run
+docker-compose exec clu guarddog --version
 ```
 
 ### Out of memory
 
-Increase Docker memory allocation or reduce `memory` limits in `docker-compose.yml`
+```bash
+# Check memory usage
+docker stats
+
+# Increase Docker memory limit in docker-compose.yml
+deploy:
+  resources:
+    limits:
+      memory: 8G  # Increase this
+```
+
+### Permission denied errors on config files
+
+```bash
+# Ensure config files are readable
+chmod 644 ./config.toml ./heuristics.toml
+
+# Verify they're mounted correctly
+docker-compose exec clu ls -la /home/cluuser/config/
+```
+
+## Logging & External Integrations
+
+CLU sends analysis results to external services in real-time:
+
+### Real-Time Alerts via Webhook
+
+```toml
+[output]
+webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK"
+```
+
+Alerts are posted to Slack (or custom endpoint) when packages are detected.
+
+### Log Aggregation (ELK, Splunk, CloudWatch)
+
+Results are also written to stdout/stderr and can be forwarded via Docker log drivers:
+
+```yaml
+# In docker-compose.yml
+services:
+  clu:
+    logging:
+      driver: "splunk"  # or awslogs, json-file, etc.
+      options:
+        splunk-token: "${SPLUNK_HEC_TOKEN}"
+        splunk-url: "https://splunk.company.com:8088"
+```
+
+See **STORAGE.md** for detailed integration examples:
+- ELK Stack with Filebeat
+- Splunk HEC integration
+- AWS CloudWatch
+- Fluent Bit multi-destination setup
 
 ## Development
 

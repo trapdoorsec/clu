@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 use serde::Serialize;
-use crate::analysis::guarddog::GuardDogResult;
-use crate::analysis::heuristics::HeuristicMatch;
-use crate::analysis::llm::{LlmAnalysisResult, PromptInjectionDetection};
-use crate::analysis::typosquat::TypoSquatterMatch;
+pub use crate::analysis::guarddog::GuardDogResult;
+pub use crate::analysis::heuristics::HeuristicMatch;
+pub use crate::analysis::llm::{LlmAnalysisResult, PromptInjectionDetection};
+pub use crate::analysis::typosquat::TypoSquatterMatch;
 
 pub mod formatters;
 pub mod webhook;

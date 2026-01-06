@@ -205,126 +205,46 @@ async fn analyze_package(
     use owo_colors::OwoColorize;
 
     let package_name = package.title.as_deref().unwrap_or("unknown");
-    let mut heuristic_matches = Vec::new();
-    let mut typosquat_matches = Vec::new();
-
-    // Get pipeline config if available, otherwise use defaults
     let pipeline_config = config.as_ref().map(|c| &c.pipeline);
 
-    // Stage 1: Heuristic Analysis
-    if is_stage_enabled(pipeline_config.map(|p| p.heuristics)) {
-        if let Some(rules) = heuristics {
-            for rule in &rules.rules {
-                if let Some(heuristic_match) = analysis::heuristics::apply_rule(rule.clone(), package) {
-                    heuristic_matches.push(heuristic_match);
-                }
-            }
-        }
-    }
-
-    // Stage 2: Typosquat Detection
-    if is_stage_enabled(pipeline_config.map(|p| p.typosquat)) {
-        if let Some(cfg) = config {
-            match analysis::typosquat::find_typosquatters(vec![package.clone()], cfg).await {
-                Ok(matches) => typosquat_matches = matches,
-                Err(e) => eprintln!("{} Typosquat analysis failed: {}", "[!]".yellow(), e),
-            }
-        }
-    }
+    // Run Stages 1 & 2 concurrently (these are always fast)
+    let (heuristic_matches, typosquat_matches) = tokio::join!(
+        run_heuristics_stage(package, heuristics, pipeline_config),
+        run_typosquat_stage(package, config, pipeline_config)
+    );
 
     // Calculate risk score based on Tier 1 findings
     let mut risk_score: u8 = 0;
     for h in &heuristic_matches {
-        risk_score = risk_score.saturating_add(h.risk_score / 2); // Scale down
+        risk_score = risk_score.saturating_add(h.risk_score / 2);
     }
     for t in &typosquat_matches {
         risk_score = risk_score.saturating_add(t.risk_score / 2);
     }
     risk_score = risk_score.min(100);
 
-    // Check if we need to download the package for stages 3 or 4
+    // Determine if we need to download package for stages 3 & 4
     let guarddog_enabled = is_stage_enabled(pipeline_config.map(|p| p.guarddog));
     let llm_enabled = is_stage_enabled(pipeline_config.map(|p| p.llm));
-    let package_contents = if guarddog_enabled || llm_enabled {
+
+    let (guarddog_result, llm_analysis) = if guarddog_enabled || llm_enabled {
+        // Download package once and share it
         match analysis::package::download_and_extract_package(package_name, None).await {
-            Ok(contents) => Some(contents),
+            Ok(package_contents) => {
+                // Run stages 3 & 4 concurrently
+                tokio::join!(
+                    run_guarddog_stage(package_name, &package_contents, guarddog_enabled),
+                    run_llm_stage(package_name, config, &package_contents, llm_enabled)
+                )
+            }
             Err(e) => {
                 eprintln!("{} Failed to download package {}: {}",
                     "[!]".yellow(), package_name.yellow(), e);
-                None
+                (None, None)
             }
         }
     } else {
-        None
-    };
-
-    // Stage 3: GuardDog Analysis
-    let guarddog_result = if guarddog_enabled {
-        if let Some(_contents) = &package_contents {
-            match analysis::guarddog::analyze_with_guarddog(package_name, None).await {
-                Ok(result) => Some(result),
-                Err(e) => {
-                    eprintln!("{} GuardDog analysis failed for {}: {}",
-                        "[!]".yellow(), package_name.yellow(), e);
-                    None
-                }
-            }
-        } else {
-            eprintln!("{} Skipping GuardDog: could not download package", "[!]".yellow());
-            None
-        }
-    } else {
-        None
-    };
-
-    // Stage 4: LLM Analysis
-    let llm_analysis = if llm_enabled {
-        if let Some(contents) = &package_contents {
-            if let Some(cfg) = config.as_ref().map(|c| &c.llm) {
-                // Extract source code for analysis
-                match analysis::package::extract_source_for_analysis(&contents, 10, 5000) {
-                    Ok(source_code) => {
-                        // Check for prompt injection first
-                        match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await {
-                            Ok(injection_result) => {
-                                if injection_result.injection_detected {
-                                    eprintln!("{} Prompt injection detected in {}",
-                                        "[!]".red(), package_name.yellow());
-                                    None
-                                } else {
-                                    // Safe to proceed with analysis
-                                    match analysis::llm::analyze_package_code(package_name, &source_code, cfg).await {
-                                        Ok(result) => Some(result),
-                                        Err(e) => {
-                                            eprintln!("{} LLM analysis failed for {}: {}",
-                                                "[!]".yellow(), package_name.yellow(), e);
-                                            None
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("{} Injection detection failed for {}: {}",
-                                    "[!]".yellow(), package_name.yellow(), e);
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("{} Failed to extract source code: {}", "[!]".yellow(), e);
-                        None
-                    }
-                }
-            } else {
-                eprintln!("{} LLM config not found", "[!]".yellow());
-                None
-            }
-        } else {
-            eprintln!("{} Skipping LLM: could not download package", "[!]".yellow());
-            None
-        }
-    } else {
-        None
+        (None, None)
     };
 
     // Determine recommendation based on risk score
@@ -347,6 +267,130 @@ async fn analyze_package(
         is_malicious,
         recommendation,
     })
+}
+
+/// Stage 1: Heuristic Analysis
+async fn run_heuristics_stage(
+    package: &feed::pypi::PythonPackage,
+    heuristics: &Option<analysis::heuristics::HeuristicRules>,
+    pipeline_config: Option<&config::PipelineConfig>,
+) -> Vec<output::HeuristicMatch> {
+    use owo_colors::OwoColorize;
+
+    if !is_stage_enabled(pipeline_config.map(|p| p.heuristics)) {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    if let Some(rules) = heuristics {
+        for rule in &rules.rules {
+            if let Some(heuristic_match) = analysis::heuristics::apply_rule(rule.clone(), package) {
+                matches.push(heuristic_match);
+            }
+        }
+    }
+    matches
+}
+
+/// Stage 2: Typosquat Detection
+async fn run_typosquat_stage(
+    package: &feed::pypi::PythonPackage,
+    config: &Option<Config>,
+    pipeline_config: Option<&config::PipelineConfig>,
+) -> Vec<output::TypoSquatterMatch> {
+    use owo_colors::OwoColorize;
+
+    if !is_stage_enabled(pipeline_config.map(|p| p.typosquat)) {
+        return Vec::new();
+    }
+
+    if let Some(cfg) = config {
+        match analysis::typosquat::find_typosquatters(vec![package.clone()], cfg).await {
+            Ok(matches) => matches,
+            Err(e) => {
+                eprintln!("{} Typosquat analysis failed: {}", "[!]".yellow(), e);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    }
+}
+
+/// Stage 3: GuardDog Analysis
+async fn run_guarddog_stage(
+    package_name: &str,
+    _package_contents: &analysis::package::PackageContents,
+    enabled: bool,
+) -> Option<output::GuardDogResult> {
+    use owo_colors::OwoColorize;
+
+    if !enabled {
+        return None;
+    }
+
+    match analysis::guarddog::analyze_with_guarddog(package_name, None).await {
+        Ok(result) => Some(result),
+        Err(e) => {
+            eprintln!("{} GuardDog analysis failed for {}: {}",
+                "[!]".yellow(), package_name.yellow(), e);
+            None
+        }
+    }
+}
+
+/// Stage 4: LLM Analysis with Prompt Injection Detection
+async fn run_llm_stage(
+    package_name: &str,
+    config: &Option<Config>,
+    package_contents: &analysis::package::PackageContents,
+    enabled: bool,
+) -> Option<output::LlmAnalysisResult> {
+    use owo_colors::OwoColorize;
+
+    if !enabled {
+        return None;
+    }
+
+    if let Some(cfg) = config.as_ref().map(|c| &c.llm) {
+        // Extract source code for analysis
+        match analysis::package::extract_source_for_analysis(package_contents, 10, 5000) {
+            Ok(source_code) => {
+                // Check for prompt injection first (sentinel)
+                match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await {
+                    Ok(injection_result) => {
+                        if injection_result.injection_detected {
+                            eprintln!("{} Prompt injection detected in {}",
+                                "[!]".red(), package_name.yellow());
+                            return None;
+                        }
+
+                        // Safe to proceed with analysis
+                        match analysis::llm::analyze_package_code(package_name, &source_code, cfg).await {
+                            Ok(result) => Some(result),
+                            Err(e) => {
+                                eprintln!("{} LLM analysis failed for {}: {}",
+                                    "[!]".yellow(), package_name.yellow(), e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{} Injection detection failed for {}: {}",
+                            "[!]".yellow(), package_name.yellow(), e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{} Failed to extract source code: {}", "[!]".yellow(), e);
+                None
+            }
+        }
+    } else {
+        eprintln!("{} LLM config not found", "[!]".yellow());
+        None
+    }
 }
 
 fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
