@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# Note: No persistent data storage in repository
+# Analysis results are ephemeral (sent to external log aggregators)
+# Logs go to stdout/stderr for Docker log drivers (ELK/Splunk/CloudWatch)

@@ -242,22 +242,87 @@ async fn analyze_package(
     }
     risk_score = risk_score.min(100);
 
-    // Stage 3: GuardDog Analysis
-    // Note: GuardDog currently requires package to be installed or available locally
-    // Full implementation would require package download first
-    let guarddog_result = if is_stage_enabled(pipeline_config.map(|p| p.guarddog)) {
-        // TODO: Implement actual GuardDog analysis
+    // Check if we need to download the package for stages 3 or 4
+    let guarddog_enabled = is_stage_enabled(pipeline_config.map(|p| p.guarddog));
+    let llm_enabled = is_stage_enabled(pipeline_config.map(|p| p.llm));
+    let package_contents = if guarddog_enabled || llm_enabled {
+        match analysis::package::download_and_extract_package(package_name, None).await {
+            Ok(contents) => Some(contents),
+            Err(e) => {
+                eprintln!("{} Failed to download package {}: {}",
+                    "[!]".yellow(), package_name.yellow(), e);
+                None
+            }
+        }
+    } else {
         None
+    };
+
+    // Stage 3: GuardDog Analysis
+    let guarddog_result = if guarddog_enabled {
+        if let Some(_contents) = &package_contents {
+            match analysis::guarddog::analyze_with_guarddog(package_name, None).await {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    eprintln!("{} GuardDog analysis failed for {}: {}",
+                        "[!]".yellow(), package_name.yellow(), e);
+                    None
+                }
+            }
+        } else {
+            eprintln!("{} Skipping GuardDog: could not download package", "[!]".yellow());
+            None
+        }
     } else {
         None
     };
 
     // Stage 4: LLM Analysis
-    // Note: LLM analysis currently requires extracted Python source code
-    // Full implementation would require package download and code extraction first
-    let llm_analysis = if is_stage_enabled(pipeline_config.map(|p| p.llm)) {
-        // TODO: Implement actual LLM analysis
-        None
+    let llm_analysis = if llm_enabled {
+        if let Some(contents) = &package_contents {
+            if let Some(cfg) = config.as_ref().map(|c| &c.llm) {
+                // Extract source code for analysis
+                match analysis::package::extract_source_for_analysis(&contents, 10, 5000) {
+                    Ok(source_code) => {
+                        // Check for prompt injection first
+                        match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await {
+                            Ok(injection_result) => {
+                                if injection_result.injection_detected {
+                                    eprintln!("{} Prompt injection detected in {}",
+                                        "[!]".red(), package_name.yellow());
+                                    None
+                                } else {
+                                    // Safe to proceed with analysis
+                                    match analysis::llm::analyze_package_code(package_name, &source_code, cfg).await {
+                                        Ok(result) => Some(result),
+                                        Err(e) => {
+                                            eprintln!("{} LLM analysis failed for {}: {}",
+                                                "[!]".yellow(), package_name.yellow(), e);
+                                            None
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("{} Injection detection failed for {}: {}",
+                                    "[!]".yellow(), package_name.yellow(), e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{} Failed to extract source code: {}", "[!]".yellow(), e);
+                        None
+                    }
+                }
+            } else {
+                eprintln!("{} LLM config not found", "[!]".yellow());
+                None
+            }
+        } else {
+            eprintln!("{} Skipping LLM: could not download package", "[!]".yellow());
+            None
+        }
     } else {
         None
     };

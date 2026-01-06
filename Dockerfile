@@ -52,8 +52,8 @@ ENV PATH="/home/cluuser/venv/bin:${PATH}"
 # Copy binary from builder
 COPY --from=builder --chown=cluuser:cluuser /build/target/release/clu /usr/local/bin/clu
 
-# Create directories for config and data
-RUN mkdir -p /home/cluuser/config /home/cluuser/data
+# Create config directory (will be mounted as read-only)
+RUN mkdir -p /home/cluuser/config
 
 # Set working directory
 WORKDIR /home/cluuser/config

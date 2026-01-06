@@ -12,15 +12,35 @@ services:
 
     # Mount configuration and data directories
     volumes:
+      # Configuration (read-only) - only persistent config
       - ./config.toml:/home/cluuser/config/config.toml:ro
       - ./heuristics.toml:/home/cluuser/config/heuristics.toml:ro
-      - clu-cache:/home/cluuser/.cache
-      - clu-ollama:/home/cluuser/.ollama
+
+      # Ollama models (persistent, shared with ollama service)
+      - clu-ollama-models:/home/cluuser/.ollama
+
+      # Note: Results are ephemeral - sent to external log aggregators
+      # See config.toml [output] webhook for how to configure ELK/Splunk integration
+      # Logs are written to stdout/stderr for docker logs and log drivers
 
     # Environment variables
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - RUST_LOG=info
+
+    # Logging: Send to external services (ELK, Splunk, etc)
+    # Docker's logging drivers forward stdout/stderr to log aggregators
+    # Examples:
+    #   - awslogs: Amazon CloudWatch
+    #   - splunk: Splunk HEC endpoint
+    #   - gcplogs: Google Cloud Logging
+    #   - awsfirelens: With Fluent Bit/Logstash
+    # See: https://docs.docker.com/config/containers/logging/configure/
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     # Network
     networks:
@@ -59,8 +79,8 @@ services:
 
     # Mount model data
     volumes:
-      - clu-ollama:/home/cluuser/.ollama
-      - clu-models:/home/cluuser/.cache/ollama
+      - clu-ollama-models:/home/cluuser/.ollama
+      - ./data/cache/ollama:/home/cluuser/.cache/ollama:rw
 
     # Expose Ollama API
     ports:
@@ -93,11 +113,8 @@ services:
 
 # Named volumes for persistent data
 volumes:
-  clu-cache:
-    driver: local
-  clu-ollama:
-    driver: local
-  clu-models:
+  # Ollama models (only this is a named volume - config is read-only)
+  clu-ollama-models:
     driver: local
 
 # Network for inter-service communication
