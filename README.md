@@ -74,7 +74,34 @@ webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 
 ### Docker Usage
 
+**Using Make (recommended):**
+
 ```bash
+# Build Docker image
+make docker-build
+
+# Start containers
+make docker-up
+
+# Watch logs from all containers
+make docker-logs
+
+# Watch CLU logs only
+make docker-logs-clu
+
+# Watch Ollama logs only
+make docker-logs-ollama
+
+# Stop containers
+make docker-down
+```
+
+**Using Docker Compose directly:**
+
+```bash
+# Build Docker image
+docker-compose build --no-cache
+
 # Start watching PyPI feed
 docker-compose up -d
 
