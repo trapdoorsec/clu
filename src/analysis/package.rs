@@ -24,28 +24,51 @@ pub async fn download_and_extract_package(
     let url = if let Some(version) = package_version {
         format!(
             "https://files.pythonhosted.org/packages/source/{}/{}-{}.tar.gz",
-            &package_name.chars().next().unwrap().to_lowercase(),
+            normalized_package_prefix(package_name),
             package_name,
             version
         )
     } else {
         // Fetch latest version from PyPI
-        let latest_version = fetch_latest_version(package_name).await?;
-        format!(
-            "https://files.pythonhosted.org/packages/source/{}/{}-{}.tar.gz",
-            &package_name.chars().next().unwrap().to_lowercase(),
-            package_name,
-            latest_version
-        )
+        eprintln!("[INFO] Fetching latest version of '{}' from PyPI...", package_name);
+        match fetch_latest_version(package_name).await {
+            Ok(latest_version) => {
+                eprintln!("[INFO] Found version: {}", latest_version);
+                format!(
+                    "https://files.pythonhosted.org/packages/source/{}/{}-{}.tar.gz",
+                    normalized_package_prefix(package_name),
+                    package_name,
+                    latest_version
+                )
+            }
+            Err(e) => {
+                eprintln!("[WARN] Could not fetch version from PyPI: {}", e);
+                eprintln!("[INFO] Trying fallback URL without version...");
+                // Fallback: try to download from PyPI files without knowing exact version
+                return download_package_fallback(package_name).await;
+            }
+        }
     };
 
+    eprintln!("[INFO] Downloading package from: {}", url);
+
     // Download package
-    let package_data = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .get(&url)
         .send()
-        .await?
-        .bytes()
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to download package: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download package - HTTP {}: {}",
+            response.status(),
+            url
+        )
+        .into());
+    }
+
+    let package_data = response.bytes().await?;
 
     // Extract to temp directory
     let temp_dir = TempDir::new()?;
@@ -60,6 +83,89 @@ pub async fn download_and_extract_package(
         source_dir: temp_dir,
         python_files,
     })
+}
+
+/// Normalize package name for PyPI directory structure
+/// PyPI uses first letter (lowercase) of normalized package name
+fn normalized_package_prefix(package_name: &str) -> String {
+    let normalized = package_name.to_lowercase().replace('-', "_").replace('.', "_");
+    normalized
+        .chars()
+        .next()
+        .map(|c| c.to_lowercase().to_string())
+        .unwrap_or_else(|| "p".to_string())
+}
+
+/// Fallback download method using PyPI simple API
+/// This is less reliable but doesn't require knowing the exact version
+async fn download_package_fallback(package_name: &str) -> Result<PackageContents, Box<dyn Error>> {
+    eprintln!("[INFO] Using fallback: fetching package links from PyPI simple API");
+
+    // Try the simple API to get available downloads
+    let simple_url = format!("https://pypi.org/simple/{}/", package_name);
+
+    let response = reqwest::Client::new()
+        .get(&simple_url)
+        .send()
+        .await
+        .map_err(|e| format!("Fallback failed - could not access PyPI simple API: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Package '{}' not found on PyPI (HTTP {})",
+            package_name,
+            response.status()
+        )
+        .into());
+    }
+
+    let html = response.text().await?;
+
+    // Look for first .tar.gz link in the HTML
+    if let Some(tar_gz_url) = html.lines()
+        .find(|line| line.contains(".tar.gz") && line.contains("href="))
+        .and_then(|line| {
+            // Extract href value
+            if let Some(start) = line.find("href=\"") {
+                if let Some(end) = line[start + 6..].find('"') {
+                    return Some(line[start + 6..start + 6 + end].to_string());
+                }
+            }
+            None
+        })
+    {
+        eprintln!("[INFO] Found package at: {}", tar_gz_url);
+
+        let response = reqwest::Client::new()
+            .get(&tar_gz_url)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to download from fallback URL").into());
+        }
+
+        let package_data = response.bytes().await?;
+
+        // Extract to temp directory
+        let temp_dir = TempDir::new()?;
+        let tar = flate2::read::GzDecoder::new(&package_data[..]);
+        let mut archive = tar::Archive::new(tar);
+        archive.unpack(temp_dir.path())?;
+
+        let python_files = find_python_files(temp_dir.path())?;
+
+        return Ok(PackageContents {
+            source_dir: temp_dir,
+            python_files,
+        });
+    }
+
+    Err(format!(
+        "Could not find .tar.gz distribution for '{}' on PyPI",
+        package_name
+    )
+    .into())
 }
 
 /// Find all .py files in a directory
@@ -133,13 +239,35 @@ async fn fetch_latest_version(package_name: &str) -> Result<String, Box<dyn Erro
     let response = reqwest::Client::new()
         .get(&url)
         .send()
-        .await?
-        .json::<serde_json::Value>()
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to fetch PyPI data for '{}': {}", package_name, e))?;
 
-    let version = response["info"]["version"]
+    if !response.status().is_success() {
+        return Err(format!(
+            "PyPI API returned status {} for package '{}' - package may not exist",
+            response.status(),
+            package_name
+        )
+        .into());
+    }
+
+    let json_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse PyPI JSON response: {}", e))?;
+
+    // Debug: log what we got
+    eprintln!("[DEBUG] PyPI response keys: {:?}", json_data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+
+    let version = json_data["info"]["version"]
         .as_str()
-        .ok_or("Could not extract version from PyPI")?;
+        .ok_or_else(|| {
+            format!(
+                "Could not extract version from PyPI for '{}'. Response structure: {}",
+                package_name,
+                serde_json::to_string_pretty(&json_data).unwrap_or_default()
+            )
+        })?;
 
     Ok(version.to_string())
 }
