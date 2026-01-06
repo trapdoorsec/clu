@@ -20,29 +20,26 @@ pub async fn download_and_extract_package(
     package_name: &str,
     package_version: Option<&str>,
 ) -> Result<PackageContents, Box<dyn Error>> {
-    // Build PyPI package URL
+    // Fetch download URL from PyPI JSON API
     let url = if let Some(version) = package_version {
-        format!(
-            "https://files.pythonhosted.org/packages/source/{}/{}-{}.tar.gz",
-            normalized_package_prefix(package_name),
-            package_name,
-            version
-        )
+        eprintln!("[INFO] Fetching download URL for '{}' version {}...", package_name, version);
+        match fetch_download_url(package_name, version).await {
+            Ok(url) => url,
+            Err(e) => {
+                eprintln!("[WARN] Could not fetch download URL: {}", e);
+                return download_package_fallback(package_name).await;
+            }
+        }
     } else {
-        // Fetch latest version from PyPI
+        // Fetch latest version and its download URL from PyPI
         eprintln!("[INFO] Fetching latest version of '{}' from PyPI...", package_name);
-        match fetch_latest_version(package_name).await {
-            Ok(latest_version) => {
-                eprintln!("[INFO] Found version: {}", latest_version);
-                format!(
-                    "https://files.pythonhosted.org/packages/source/{}/{}-{}.tar.gz",
-                    normalized_package_prefix(package_name),
-                    package_name,
-                    latest_version
-                )
+        match fetch_download_url_latest(package_name).await {
+            Ok((version, url)) => {
+                eprintln!("[INFO] Found version: {}", version);
+                url
             }
             Err(e) => {
-                eprintln!("[WARN] Could not fetch version from PyPI: {}", e);
+                eprintln!("[WARN] Could not fetch download URL from PyPI: {}", e);
                 eprintln!("[INFO] Trying fallback URL without version...");
                 // Fallback: try to download from PyPI files without knowing exact version
                 return download_package_fallback(package_name).await;
@@ -83,17 +80,6 @@ pub async fn download_and_extract_package(
         source_dir: temp_dir,
         python_files,
     })
-}
-
-/// Normalize package name for PyPI directory structure
-/// PyPI uses first letter (lowercase) of normalized package name
-fn normalized_package_prefix(package_name: &str) -> String {
-    let normalized = package_name.to_lowercase().replace('-', "_").replace('.', "_");
-    normalized
-        .chars()
-        .next()
-        .map(|c| c.to_lowercase().to_string())
-        .unwrap_or_else(|| "p".to_string())
 }
 
 /// Fallback download method using PyPI simple API
@@ -232,8 +218,8 @@ pub fn extract_source_for_analysis(
     Ok(combined_source)
 }
 
-/// Fetch latest version from PyPI JSON API
-async fn fetch_latest_version(package_name: &str) -> Result<String, Box<dyn Error>> {
+/// Fetch download URL for a specific package version from PyPI JSON API
+async fn fetch_download_url(package_name: &str, version: &str) -> Result<String, Box<dyn Error>> {
     let url = format!("https://pypi.org/pypi/{}/json", package_name);
 
     let response = reqwest::Client::new()
@@ -256,20 +242,81 @@ async fn fetch_latest_version(package_name: &str) -> Result<String, Box<dyn Erro
         .await
         .map_err(|e| format!("Failed to parse PyPI JSON response: {}", e))?;
 
-    // Debug: log what we got
-    eprintln!("[DEBUG] PyPI response keys: {:?}", json_data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+    // Get the releases for the specific version
+    if let Some(releases) = json_data["releases"][version].as_array() {
+        // Find the source distribution (.tar.gz)
+        for release in releases {
+            if let Some(filename) = release["filename"].as_str() {
+                if filename.ends_with(".tar.gz") {
+                    if let Some(download_url) = release["url"].as_str() {
+                        return Ok(download_url.to_string());
+                    }
+                }
+            }
+        }
+    }
 
+    Err(format!(
+        "Could not find .tar.gz distribution for '{}' version '{}' on PyPI",
+        package_name, version
+    )
+    .into())
+}
+
+/// Fetch latest version and its download URL from PyPI JSON API
+async fn fetch_download_url_latest(package_name: &str) -> Result<(String, String), Box<dyn Error>> {
+    let url = format!("https://pypi.org/pypi/{}/json", package_name);
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch PyPI data for '{}': {}", package_name, e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "PyPI API returned status {} for package '{}' - package may not exist",
+            response.status(),
+            package_name
+        )
+        .into());
+    }
+
+    let json_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse PyPI JSON response: {}", e))?;
+
+    // Get the latest version from info
     let version = json_data["info"]["version"]
         .as_str()
         .ok_or_else(|| {
             format!(
-                "Could not extract version from PyPI for '{}'. Response structure: {}",
-                package_name,
-                serde_json::to_string_pretty(&json_data).unwrap_or_default()
+                "Could not extract version from PyPI for '{}'",
+                package_name
             )
-        })?;
+        })?
+        .to_string();
 
-    Ok(version.to_string())
+    // Get the releases for this version
+    if let Some(releases) = json_data["releases"][&version].as_array() {
+        // Find the source distribution (.tar.gz)
+        for release in releases {
+            if let Some(filename) = release["filename"].as_str() {
+                if filename.ends_with(".tar.gz") {
+                    if let Some(download_url) = release["url"].as_str() {
+                        return Ok((version, download_url.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Could not find .tar.gz distribution for '{}' on PyPI",
+        package_name
+    )
+    .into())
 }
 
 #[cfg(test)]

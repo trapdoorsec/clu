@@ -23,13 +23,18 @@ pub struct GuardDogFinding {
 }
 
 /// GuardDog JSON output structure (internal)
+/// Handles both formats: {"results": [...]} and direct array [...]
 #[derive(Debug, Deserialize)]
-struct GuardDogJson {
-    #[serde(default)]
-    results: Vec<JsonFinding>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    errors: Vec<String>,
+#[serde(untagged)]
+enum GuardDogJson {
+    Object {
+        #[serde(default)]
+        results: Vec<JsonFinding>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        errors: Vec<String>,
+    },
+    Array(Vec<JsonFinding>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,9 +104,14 @@ fn parse_guarddog_output(stdout: &[u8]) -> Result<GuardDogResult, Box<dyn Error>
         }
     };
 
+    // Extract results based on format (object or array)
+    let results = match parsed {
+        GuardDogJson::Object { results, .. } => results,
+        GuardDogJson::Array(array) => array,
+    };
+
     // Convert GuardDog issues to our findings format
-    let findings: Vec<GuardDogFinding> = parsed
-        .results
+    let findings: Vec<GuardDogFinding> = results
         .iter()
         .map(|issue| GuardDogFinding {
             rule_name: issue.rule.clone(),
@@ -208,11 +218,19 @@ mod tests {
 
     #[test]
     fn test_parse_empty_json() {
+        // Test object format
         let json = r#"{"results": [], "errors": []}"#;
         let result = parse_guarddog_output(json.as_bytes()).unwrap();
         assert!(!result.is_malicious);
         assert_eq!(result.risk_score, 0);
         assert_eq!(result.findings.len(), 0);
+
+        // Test array format
+        let json_array = r#"[]"#;
+        let result_array = parse_guarddog_output(json_array.as_bytes()).unwrap();
+        assert!(!result_array.is_malicious);
+        assert_eq!(result_array.risk_score, 0);
+        assert_eq!(result_array.findings.len(), 0);
     }
 
     #[test]

@@ -35,7 +35,24 @@ pub struct TypoSquatterMatch {
 
 async fn get_popular_packages(conf: &FeedConfig) -> Result<Vec<PackageRow>, Box<dyn Error>> {
     let url = &conf.popular_packages_endpoint;
-    let json: PopularPackagesResponse = reqwest::get(url).await?.json().await?;
+
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Failed to fetch popular packages list: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to fetch popular packages - HTTP {}: {}",
+            response.status(),
+            url
+        ).into());
+    }
+
+    let json: PopularPackagesResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse popular packages JSON: {}", e))?;
+
     let top_1000: Vec<PackageRow> = json.rows.into_iter().take(1000).collect();
     Ok(top_1000)
 }

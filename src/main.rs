@@ -275,7 +275,6 @@ async fn run_heuristics_stage(
     heuristics: &Option<analysis::heuristics::HeuristicRules>,
     pipeline_config: Option<&config::PipelineConfig>,
 ) -> Vec<output::HeuristicMatch> {
-    use owo_colors::OwoColorize;
 
     if !is_stage_enabled(pipeline_config.map(|p| p.heuristics)) {
         return Vec::new();

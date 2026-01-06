@@ -30,7 +30,8 @@ pub async fn detect_prompt_injection(
     code_snippet: &str,
     config: &LlmConfig,
 ) -> Result<PromptInjectionDetection, Box<dyn Error>> {
-    let ollama = Ollama::default();
+    let (host, port) = config.parse_endpoint()?;
+    let ollama = Ollama::new(host, port);
     let prompt = build_sentinel_prompt(package_name, code_snippet);
     let request = GenerationRequest::new(
         config.model.clone(),
@@ -49,7 +50,8 @@ pub async fn analyze_package_code(
     code_snippet: &str,
     config: &LlmConfig,
 ) -> Result<LlmAnalysisResult, Box<dyn Error>> {
-    let ollama = Ollama::default();
+    let (host, port) = config.parse_endpoint()?;
+    let ollama = Ollama::new(host, port);
     let prompt = build_analysis_prompt(package_name, code_snippet);
     let request = GenerationRequest::new(
         config.model.clone(),

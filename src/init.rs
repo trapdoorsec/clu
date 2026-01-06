@@ -369,11 +369,10 @@ mod tests {
             webhook: Some("https://webhook.site/test".to_string()),
             log_level: "info".to_string(),
             enable_tui: true,
-            heuristics_trigger: "always".to_string(),
-            typosquat_trigger: "always".to_string(),
-            guarddog_trigger: "conditional".to_string(),
-            llm_trigger: "conditional".to_string(),
-            trigger_threshold: 30,
+            heuristics_enabled: true,
+            typosquat_enabled: true,
+            guarddog_enabled: true,
+            llm_enabled: true,
         };
 
         let toml = generate_toml(&config);
@@ -381,8 +380,10 @@ mod tests {
         assert!(toml.contains("endpoint = \"https://pypi.org/rss/packages.xml\""));
         assert!(toml.contains("webhook = \"https://webhook.site/test\""));
         assert!(toml.contains("log_level = \"info\""));
-        assert!(toml.contains("heuristics = \"always\""));
-        assert!(toml.contains("trigger_threshold = 30"));
+        assert!(toml.contains("heuristics = true"));
+        assert!(toml.contains("typosquat = true"));
+        assert!(toml.contains("guarddog = true"));
+        assert!(toml.contains("llm = true"));
     }
 
     #[test]
@@ -399,20 +400,23 @@ mod tests {
             webhook: None,
             log_level: "debug".to_string(),
             enable_tui: false,
-            heuristics_trigger: "always".to_string(),
-            typosquat_trigger: "conditional".to_string(),
-            guarddog_trigger: "disabled".to_string(),
-            llm_trigger: "always".to_string(),
-            trigger_threshold: 50,
+            heuristics_enabled: true,
+            typosquat_enabled: true,
+            guarddog_enabled: false,
+            llm_enabled: false,
         };
 
         let toml = generate_toml(&config);
 
         assert!(toml.contains("# webhook ="));
-        assert!(!toml.contains("webhook = \"https"));
+        // Should have commented webhook, not active webhook line
+        let has_active_webhook = toml.lines()
+            .any(|line| line.starts_with("webhook = \"") && !line.starts_with("# webhook"));
+        assert!(!has_active_webhook);
         assert!(toml.contains("check_updates = true"));
         assert!(toml.contains("enable_tui = false"));
-        assert!(toml.contains("typosquat = \"conditional\""));
-        assert!(toml.contains("guarddog = \"disabled\""));
+        assert!(toml.contains("typosquat = true"));
+        assert!(toml.contains("guarddog = false"));
+        assert!(toml.contains("llm = false"));
     }
 }

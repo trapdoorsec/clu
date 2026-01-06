@@ -27,6 +27,17 @@ pub struct LlmConfig {
     pub model: String,
 }
 
+impl LlmConfig {
+    /// Parse endpoint URL to extract host and port
+    /// Example: "http://ollama:11434" -> ("ollama", 11434)
+    pub fn parse_endpoint(&self) -> Result<(String, u16), Box<dyn std::error::Error>> {
+        let url = url::Url::parse(&self.endpoint)?;
+        let host = url.host_str().unwrap_or("localhost").to_string();
+        let port = url.port().unwrap_or(11434);
+        Ok((host, port))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AnalysisConfig {
     /// Maximum Levenshtein distance to consider as potential typosquat

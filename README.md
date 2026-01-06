@@ -492,18 +492,60 @@ See **STORAGE.md** for detailed integration examples:
 
 ## Development
 
+**Use the Makefile for development tasks:**
+
 ```bash
-# Build locally
+# View all available targets
+make help
+
+# Run full test suite and build checks
+make all
+
+# Build optimized release binary
+make release
+
+# Run unit tests (17 tests)
+make test
+
+# Run tests with output
+make test-verbose
+
+# Run specific test suite
+make test-injection
+
+# Check code with clippy
+make check
+
+# Format code
+make fmt-fix
+```
+
+**Or use cargo directly:**
+
+```bash
+# Build debug binary
+cargo build
+
+# Build release binary
 cargo build --release
 
-# Run tests
-cargo test
+# Run all tests
+cargo test --lib
+
+# Run tests with output
+cargo test --lib -- --nocapture
 
 # Check code
 cargo clippy
 
-# Format code
+# Check formatting
+cargo fmt --check
+
+# Auto-format code
 cargo fmt
+
+# Clean build artifacts
+cargo clean
 ```
 
 ## License
