@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use ollama_rs::Ollama;
 use ollama_rs::generation::completion::request::GenerationRequest;
 use std::error::Error;
@@ -222,14 +224,13 @@ fn extract_reasoning(response: &str) -> Option<String> {
     for line in response.lines() {
         let lower = line.to_lowercase();
         // Use starts_with to prevent injection
-        if lower.starts_with("reasoning:") {
-            if let Some(colon_pos) = line.find(':') {
+        if lower.starts_with("reasoning:")
+            && let Some(colon_pos) = line.find(':') {
                 let reasoning = line[colon_pos + 1..].trim();
                 if !reasoning.is_empty() {
                     return Some(reasoning.to_string());
                 }
             }
-        }
     }
 
     // Fallback: just return the full response
@@ -245,15 +246,14 @@ fn extract_confidence(response: &str) -> Option<f32> {
     for line in response.lines() {
         let lower = line.to_lowercase();
         // Use starts_with to prevent injection
-        if lower.starts_with("confidence:") {
-            if let Some(colon_pos) = line.find(':') {
+        if lower.starts_with("confidence:")
+            && let Some(colon_pos) = line.find(':') {
                 let after_colon = line[colon_pos + 1..].trim();
                 // Try to parse as float
                 if let Ok(conf) = after_colon.parse::<f32>() {
                     return Some(conf.clamp(0.0, 1.0));
                 }
             }
-        }
     }
     None
 }
@@ -263,8 +263,8 @@ fn extract_evidence(response: &str) -> Vec<String> {
     for line in response.lines() {
         let lower = line.to_lowercase();
         // Use starts_with to prevent injection
-        if lower.starts_with("evidence:") {
-            if let Some(colon_pos) = line.find(':') {
+        if lower.starts_with("evidence:")
+            && let Some(colon_pos) = line.find(':') {
                 let evidence_str = line[colon_pos + 1..].trim();
 
                 // If "none", return empty vec
@@ -280,7 +280,6 @@ fn extract_evidence(response: &str) -> Vec<String> {
                     .take(10) // Limit to 10 pieces of evidence
                     .collect();
             }
-        }
     }
     vec![]
 }

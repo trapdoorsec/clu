@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::config::{Config, FeedConfig};
 use crate::feed::pypi::PythonPackage;
 use levenshtein::levenshtein;
@@ -6,14 +8,18 @@ use std::error::Error;
 
 #[derive(Debug, Deserialize)]
 struct PopularPackagesResponse {
+    #[allow(dead_code)]
     last_update: String,
+    #[allow(dead_code)]
     source: String,
+    #[allow(dead_code)]
     meta: Vec<String>,
     rows: Vec<PackageRow>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct PackageRow {
+    #[allow(dead_code)]
     download_count: String,
     project: String,
 }

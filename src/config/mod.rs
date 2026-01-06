@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde::Deserialize;
 use std::fs;
 
@@ -7,6 +9,8 @@ pub struct Config {
     pub llm: LlmConfig,
     pub analysis: AnalysisConfig,
     pub output: OutputConfig,
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +64,52 @@ fn default_log_level() -> String {
 
 fn default_enable_tui() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PipelineConfig {
+    /// Enable heuristic-based metadata analysis (fast, low false positives)
+    #[serde(default = "default_heuristics")]
+    pub heuristics: bool,
+
+    /// Enable typosquat detection based on Levenshtein distance
+    #[serde(default = "default_typosquat")]
+    pub typosquat: bool,
+
+    /// Enable GuardDog pattern-based code analysis (requires download)
+    #[serde(default = "default_guarddog")]
+    pub guarddog: bool,
+
+    /// Enable LLM semantic code analysis (requires download, slower)
+    #[serde(default = "default_llm")]
+    pub llm: bool,
+}
+
+fn default_heuristics() -> bool {
+    true
+}
+
+fn default_typosquat() -> bool {
+    true
+}
+
+fn default_guarddog() -> bool {
+    false
+}
+
+fn default_llm() -> bool {
+    false
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        PipelineConfig {
+            heuristics: true,
+            typosquat: true,
+            guarddog: false,
+            llm: false,
+        }
+    }
 }
 
 impl Config {

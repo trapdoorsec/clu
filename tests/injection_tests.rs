@@ -219,7 +219,7 @@ fn test_path_traversal_in_file_path() {
                         "Expected failure error for: {}. Got: {}", path, error);
 
                 // Path in error should not break out of quotes
-                assert!(!has_path_traversal_risk(&error),
+                assert!(!has_path_traversal_risk(error),
                         "Error has path traversal risk: {}", error);
             }
         }

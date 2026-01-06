@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::feed;
 use feed::pypi::PythonPackage;
 use regex::Regex;
@@ -13,7 +15,7 @@ pub struct HeuristicMatch {
     pub location: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct HeuristicRule {
     pub name: String,
     #[serde(rename = "type")]
@@ -129,7 +131,7 @@ pub fn validate_heuristics_file(path: &str) -> Result<(), Vec<String>> {
         let rule_name = rule_table
             .get("name")
             .and_then(|n| n.as_str())
-            .map(|s| sanitize_error_string(s))
+            .map(sanitize_error_string)
             .unwrap_or_else(|| format!("#{}", idx));
 
         // Check required fields for all rules
@@ -205,15 +207,14 @@ pub fn validate_heuristics_file(path: &str) -> Result<(), Vec<String>> {
                 }
                 if !rule_table.contains_key("check") {
                     errors.push(format!("Metadata rule '{}' missing 'check'", rule_name));
-                } else if let Some(check) = rule_table.get("check").and_then(|c| c.as_str()) {
-                    if !valid_checks.contains(&check) {
+                } else if let Some(check) = rule_table.get("check").and_then(|c| c.as_str())
+                    && !valid_checks.contains(&check) {
                         let safe_check = sanitize_error_string(check);
                         errors.push(format!(
                             "Metadata rule '{}' has invalid check [{}], must be one of: {:?}",
                             rule_name, safe_check, valid_checks
                         ));
                     }
-                }
             }
             "" => {
                 errors.push(format!("Rule '{}' has empty type", rule_name));
@@ -228,15 +229,14 @@ pub fn validate_heuristics_file(path: &str) -> Result<(), Vec<String>> {
         }
 
         // Validate field name if present
-        if let Some(field) = rule_table.get("field").and_then(|f| f.as_str()) {
-            if !valid_fields.contains(&field) {
+        if let Some(field) = rule_table.get("field").and_then(|f| f.as_str())
+            && !valid_fields.contains(&field) {
                 let safe_field = sanitize_error_string(field);
                 errors.push(format!(
                     "Rule '{}' has invalid field [{}], must be one of: {:?}",
                     rule_name, safe_field, valid_fields
                 ));
             }
-        }
     }
 
     if errors.is_empty() {
@@ -244,16 +244,6 @@ pub fn validate_heuristics_file(path: &str) -> Result<(), Vec<String>> {
     } else {
         Err(errors)
     }
-}
-fn heuristic_check(_pkg: PythonPackage) -> Result<HeuristicMatch, Box<dyn Error>> {
-    let h_match = HeuristicMatch {
-        rule_name: "".to_string(),
-        risk_score: 0,
-        evidence: "".to_string(),
-        description: "".to_string(),
-        location: "".to_string(),
-    };
-    Ok(h_match)
 }
 
 pub fn apply_rule(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicMatch> {

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::process::Command;
@@ -26,6 +28,7 @@ struct GuardDogJson {
     #[serde(default)]
     results: Vec<JsonFinding>,
     #[serde(default)]
+    #[allow(dead_code)]
     errors: Vec<String>,
 }
 

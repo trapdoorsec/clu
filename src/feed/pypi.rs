@@ -1,4 +1,7 @@
-pub(crate) struct PythonPackage {
+#![allow(dead_code)]
+
+#[derive(Clone)]
+pub struct PythonPackage {
     pub title: Option<String>,
     pub link: Option<String>,
     pub description: Option<String>,

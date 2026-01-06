@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::output::AnalysisReport;
 use crate::output::Formatter;
 

@@ -1,9 +1,10 @@
+#![allow(dead_code)]
+
 use serde::Serialize;
 use crate::analysis::guarddog::GuardDogResult;
 use crate::analysis::heuristics::HeuristicMatch;
 use crate::analysis::llm::{LlmAnalysisResult, PromptInjectionDetection};
 use crate::analysis::typosquat::TypoSquatterMatch;
-use crate::feed::pypi::PythonPackage;
 
 pub mod formatters;
 pub mod webhook;

@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.53", features = ["derive", "color", "cargo"] }
-tokio = "1.48.0"
+tokio = { version = "1.48.0", features = ["full"] }
 reqwest = "0.12.28"
 serde = { version = "1.0.228", features = ["default"] }
 serde_json = "1.0.148"
@@ -25,3 +25,11 @@ rss = "2.0.12"
 http = "1.4.0"
 toml = "0.9.10"
 regex = "1.12.2"
+owo-colors = { version = "4.1.0", features = ["supports-colors"] }
+rand = "0.8.5"
+dialoguer = "0.11.0"
+chrono = "0.4"
+flate2 = "1.0"
+tar = "0.4"
+tempfile = "3.0"
+walkdir = "2.5"

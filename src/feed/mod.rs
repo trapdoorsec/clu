@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod pypi;
 use pypi::PythonPackage;
 use rss::Channel;
