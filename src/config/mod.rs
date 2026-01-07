@@ -10,6 +10,8 @@ pub struct Config {
     pub analysis: AnalysisConfig,
     pub output: OutputConfig,
     #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
     pub pipeline: PipelineConfig,
 }
 
@@ -25,17 +27,12 @@ pub struct FeedConfig {
 pub struct LlmConfig {
     pub endpoint: String,
     pub model: String,
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout: u64,
 }
 
-impl LlmConfig {
-    /// Parse endpoint URL to extract host and port
-    /// Example: "http://ollama:11434" -> ("ollama", 11434)
-    pub fn parse_endpoint(&self) -> Result<(String, u16), Box<dyn std::error::Error>> {
-        let url = url::Url::parse(&self.endpoint)?;
-        let host = url.host_str().unwrap_or("localhost").to_string();
-        let port = url.port().unwrap_or(11434);
-        Ok((host, port))
-    }
+fn default_request_timeout() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +72,25 @@ fn default_log_level() -> String {
 
 fn default_enable_tui() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CacheConfig {
+    /// Directory for caching pip packages (used by GuardDog and LLM)
+    #[serde(default = "default_pip_cache_dir")]
+    pub pip_cache_dir: String,
+}
+
+fn default_pip_cache_dir() -> String {
+    "/tmp/pip-cache".to_string()
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        CacheConfig {
+            pip_cache_dir: default_pip_cache_dir(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

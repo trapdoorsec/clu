@@ -23,6 +23,10 @@ struct Args {
 fn main() {
     print_banner();
     let cmd = command_builder().get_matches();
+
+    // Initialize logging based on config
+    initialize_logging();
+
     if cmd.subcommand().is_none() {
         // No subcommand provided, just show the banner
         return;
@@ -34,6 +38,34 @@ fn main() {
         Some(_) => handle_unknown(),
         None => todo!(),
     }
+}
+
+/// Initialize logging based on config.toml log_level setting
+fn initialize_logging() {
+    use log::LevelFilter;
+
+    // Try to load config to get log level
+    let log_level = if let Ok(config) = Config::load("config.toml") {
+        match config.output.log_level.to_lowercase().as_str() {
+            "debug" => LevelFilter::Debug,
+            "info" => LevelFilter::Info,
+            "warn" => LevelFilter::Warn,
+            "error" => LevelFilter::Error,
+            _ => LevelFilter::Info,
+        }
+    } else {
+        // Default to Info if config not available
+        LevelFilter::Info
+    };
+
+    // Build logger with custom format
+    env_logger::Builder::from_default_env()
+        .filter_level(log_level)
+        .format(|buf, record| {
+            use std::io::Write;
+            writeln!(buf, "[{}] {}", record.level(), record.args())
+        })
+        .init();
 }
 
 fn handle_unknown() {
@@ -51,6 +83,15 @@ fn handle_watch(args: &ArgMatches) {
 
     // Try to load config file
     let config = Config::load("config.toml").ok();
+
+    // Set PIP_CACHE_DIR from config for use by GuardDog and LLM
+    if let Some(ref cfg) = config {
+        // Safety: set_var is unsafe but we're setting it once at startup before spawning analysis tasks
+        unsafe {
+            std::env::set_var("PIP_CACHE_DIR", &cfg.cache.pip_cache_dir);
+        }
+        log::debug!("Set PIP_CACHE_DIR={}", cfg.cache.pip_cache_dir);
+    }
 
     // Priority: CLI args > config.toml > hardcoded defaults
     let url = args
@@ -202,7 +243,6 @@ async fn analyze_package(
     heuristics: &Option<analysis::heuristics::HeuristicRules>,
 ) -> Result<output::AnalysisReport, Box<dyn std::error::Error>> {
     use chrono::Utc;
-    use owo_colors::OwoColorize;
 
     let package_name = package.title.as_deref().unwrap_or("unknown");
     let pipeline_config = config.as_ref().map(|c| &c.pipeline);
@@ -227,25 +267,17 @@ async fn analyze_package(
     let guarddog_enabled = is_stage_enabled(pipeline_config.map(|p| p.guarddog));
     let llm_enabled = is_stage_enabled(pipeline_config.map(|p| p.llm));
 
-    let (guarddog_result, llm_analysis) = if guarddog_enabled || llm_enabled {
-        // Download package once and share it
-        match analysis::package::download_and_extract_package(package_name, None).await {
-            Ok(package_contents) => {
-                // Run stages 3 & 4 concurrently
-                tokio::join!(
-                    run_guarddog_stage(package_name, &package_contents, guarddog_enabled),
-                    run_llm_stage(package_name, config, &package_contents, llm_enabled)
-                )
-            }
-            Err(e) => {
-                eprintln!("{} Failed to download package {}: {}",
-                    "[!]".yellow(), package_name.yellow(), e);
-                (None, None)
-            }
-        }
+    // Try to download package, but don't let failure skip stages
+    let package_result = if guarddog_enabled || llm_enabled {
+        Some(analysis::package::download_and_extract_package(package_name, None).await)
     } else {
-        (None, None)
+        None
     };
+
+    let (guarddog_result, llm_analysis) = tokio::join!(
+        run_guarddog_stage(package_name, &package_result, guarddog_enabled),
+        run_llm_stage(package_name, config, &package_result, llm_enabled)
+    );
 
     // Determine recommendation based on risk score
     let (is_malicious, recommendation) = match risk_score {
@@ -280,6 +312,9 @@ async fn run_heuristics_stage(
         return Vec::new();
     }
 
+    let pkg_name = package.title.as_deref().unwrap_or("unknown");
+    log::debug!("Stage 1: Starting heuristics analysis for {}", pkg_name);
+
     let mut matches = Vec::new();
     if let Some(rules) = heuristics {
         for rule in &rules.rules {
@@ -288,6 +323,8 @@ async fn run_heuristics_stage(
             }
         }
     }
+
+    log::debug!("Stage 1: Heuristics analysis completed for {} ({} matches)", pkg_name, matches.len());
     matches
 }
 
@@ -303,15 +340,22 @@ async fn run_typosquat_stage(
         return Vec::new();
     }
 
+    let pkg_name = package.title.as_deref().unwrap_or("unknown");
+    log::debug!("Stage 2: Starting typosquat analysis for {}", pkg_name);
+
     if let Some(cfg) = config {
         match analysis::typosquat::find_typosquatters(vec![package.clone()], cfg).await {
-            Ok(matches) => matches,
+            Ok(matches) => {
+                log::debug!("Stage 2: Typosquat analysis completed for {} ({} matches)", pkg_name, matches.len());
+                matches
+            }
             Err(e) => {
-                eprintln!("{} Typosquat analysis failed: {}", "[!]".yellow(), e);
+                eprintln!("{} Stage 2: Typosquat analysis failed for {}: {}", "[!]".yellow(), pkg_name.yellow(), e);
                 Vec::new()
             }
         }
     } else {
+        eprintln!("{} Stage 2: Config not found, skipping typosquat analysis", "[!]".yellow());
         Vec::new()
     }
 }
@@ -319,7 +363,7 @@ async fn run_typosquat_stage(
 /// Stage 3: GuardDog Analysis
 async fn run_guarddog_stage(
     package_name: &str,
-    _package_contents: &analysis::package::PackageContents,
+    _package_result: &Option<Result<analysis::package::PackageContents, Box<dyn std::error::Error>>>,
     enabled: bool,
 ) -> Option<output::GuardDogResult> {
     use owo_colors::OwoColorize;
@@ -328,10 +372,14 @@ async fn run_guarddog_stage(
         return None;
     }
 
+    log::debug!("Stage 3: Starting GuardDog analysis for {}", package_name);
     match analysis::guarddog::analyze_with_guarddog(package_name, None).await {
-        Ok(result) => Some(result),
+        Ok(result) => {
+            log::debug!("Stage 3: GuardDog analysis completed for {}", package_name);
+            Some(result)
+        }
         Err(e) => {
-            eprintln!("{} GuardDog analysis failed for {}: {}",
+            eprintln!("{} Stage 3: GuardDog analysis failed for {}: {}",
                 "[!]".yellow(), package_name.yellow(), e);
             None
         }
@@ -342,7 +390,7 @@ async fn run_guarddog_stage(
 async fn run_llm_stage(
     package_name: &str,
     config: &Option<Config>,
-    package_contents: &analysis::package::PackageContents,
+    package_result: &Option<Result<analysis::package::PackageContents, Box<dyn std::error::Error>>>,
     enabled: bool,
 ) -> Option<output::LlmAnalysisResult> {
     use owo_colors::OwoColorize;
@@ -351,7 +399,24 @@ async fn run_llm_stage(
         return None;
     }
 
+    log::debug!("Stage 4: Starting LLM analysis for {}", package_name);
+
     if let Some(cfg) = config.as_ref().map(|c| &c.llm) {
+        // Check if package download succeeded
+        let package_contents = match package_result {
+            Some(Ok(contents)) => contents,
+            Some(Err(e)) => {
+                eprintln!("{} Stage 4: Package download failed, cannot run LLM analysis: {}",
+                    "[!]".yellow(), e);
+                return None;
+            }
+            None => {
+                eprintln!("{} Stage 4: Package download was not attempted, cannot run LLM analysis",
+                    "[!]".yellow());
+                return None;
+            }
+        };
+
         // Extract source code for analysis
         match analysis::package::extract_source_for_analysis(package_contents, 10, 5000) {
             Ok(source_code) => {
@@ -366,28 +431,31 @@ async fn run_llm_stage(
 
                         // Safe to proceed with analysis
                         match analysis::llm::analyze_package_code(package_name, &source_code, cfg).await {
-                            Ok(result) => Some(result),
+                            Ok(result) => {
+                                log::debug!("Stage 4: LLM analysis completed for {}", package_name);
+                                Some(result)
+                            }
                             Err(e) => {
-                                eprintln!("{} LLM analysis failed for {}: {}",
+                                eprintln!("{} Stage 4: LLM analysis failed for {}: {}",
                                     "[!]".yellow(), package_name.yellow(), e);
                                 None
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("{} Injection detection failed for {}: {}",
+                        eprintln!("{} Stage 4: Injection detection failed for {}: {}",
                             "[!]".yellow(), package_name.yellow(), e);
                         None
                     }
                 }
             }
             Err(e) => {
-                eprintln!("{} Failed to extract source code: {}", "[!]".yellow(), e);
+                eprintln!("{} Stage 4: Failed to extract source code: {}", "[!]".yellow(), e);
                 None
             }
         }
     } else {
-        eprintln!("{} LLM config not found", "[!]".yellow());
+        eprintln!("{} LLM config not found, skipping Stage 4", "[!]".yellow());
         None
     }
 }

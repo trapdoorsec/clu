@@ -18,23 +18,37 @@ cargo build
 # Build release binary (optimized)
 cargo build --release
 
-# Run tests
-cargo test
+# Run all tests
+cargo test --lib
 
-# Run specific test file
-cargo test --test injection_tests
+# Run tests with output
+cargo test --lib -- --nocapture --test-threads=1
 
-# Run specific test
-cargo test --test injection_tests test_name
+# Run injection detection tests
+cargo test --test injection_tests -- --nocapture --test-threads=1
 
 # Code linting
 cargo clippy
 
-# Format code
+# Check code formatting
 cargo fmt --check
 
 # Auto-format code
 cargo fmt
+```
+
+Alternatively, use the Makefile for common tasks:
+```bash
+# Make targets (see 'make help' for full list)
+make build          # Build debug binary
+make release        # Build optimized release binary
+make test           # Run all tests
+make test-verbose   # Run tests with output
+make test-injection # Run injection tests only
+make check          # Run clippy linter
+make fmt            # Check formatting
+make fmt-fix        # Auto-format code
+make all            # Build, test, and check (comprehensive)
 ```
 
 ### Running the Application
@@ -111,12 +125,39 @@ CLU processes packages through a configurable pipeline with four analysis stages
 // Main analysis report (src/output/mod.rs)
 pub struct AnalysisReport {
     pub package_name: String,
+    pub package_version: Option<String>,
+    pub timestamp: String,
+
+    // Tier 1: Heuristics
     pub heuristic_matches: Vec<HeuristicMatch>,
-    pub typosquat_matches: Vec<TyposquatMatch>,
-    pub llm_analysis: Option<LLMAnalysis>,
+    pub typosquat_matches: Vec<TypoSquatterMatch>,
+
+    // Tier 2: LLM
+    pub injection_detection: Option<PromptInjectionDetection>,
+    pub llm_analysis: Option<LlmAnalysisResult>,
+
+    // Tier 3: GuardDog
     pub guarddog_result: Option<GuardDogResult>,
-    pub overall_risk_score: u8,  // 0-100
-    pub recommendation: String,  // SAFE/REVIEW/BLOCK/CRITICAL
+
+    // Summary
+    pub overall_risk_score: u8,    // 0-100
+    pub is_malicious: bool,
+    pub recommendation: String,     // "BLOCK", "REVIEW", "SAFE"
+}
+
+// LLM semantic analysis result (src/analysis/llm.rs)
+pub struct LlmAnalysisResult {
+    pub is_malicious: bool,
+    pub risk_score: u8,
+    pub reasoning: String,
+    pub confidence: f32,
+}
+
+// Prompt injection detection (src/analysis/llm.rs)
+pub struct PromptInjectionDetection {
+    pub injection_detected: bool,
+    pub confidence: f32,
+    pub evidence: Vec<String>,
 }
 
 // Package metadata (src/feed/pypi.rs)
@@ -135,16 +176,18 @@ Aggregation logic in `src/analysis/mod.rs` (`analyze_package` function):
 - Heuristic matches: scaled down (divided by 2)
 - Typosquat matches: scaled down (divided by 2)
 - Combined result capped at 100
-- Recommendations: 0-30 SAFE (green) → 31-70 REVIEW (yellow) → 71-85 BLOCK (red) → 86-100 CRITICAL (purple)
+- Recommendations: 0-30 SAFE → 31-70 REVIEW → 71-100 BLOCK
+- `is_malicious` flag: true if risk_score >= THRESHOLD (typically 70+)
 
 ### Key Configuration
 
 Located in `config.toml`:
-- `[feed]` - PyPI RSS endpoint, polling interval
-- `[llm]` - Ollama endpoint + model name
+- `[feed]` - PyPI RSS endpoint, polling interval, popular packages endpoint, update checking
+- `[llm]` - Ollama endpoint, model name, request timeout
 - `[analysis]` - Thresholds (typosquat distance, min package length)
 - `[output]` - Log level, TUI enable, webhook URL
-- `[pipeline]` - Boolean flags for enabling/disabling each stage
+- `[cache]` - Pip package cache directory (used by GuardDog and LLM)
+- `[pipeline]` - Boolean flags for enabling/disabling each stage (heuristics, typosquat, guarddog, llm)
 
 Custom heuristic rules defined in `heuristics.toml` with format:
 ```toml
@@ -160,11 +203,16 @@ description = "Suspicious author name"
 ### Output Formatters
 
 Located in `src/output/formatters/`:
-- `ColouredTextFormatter` - Colorized terminal output (fully implemented)
-- `JsonFormatter` - JSON serialization (fully implemented)
-- `TextFormatter` - Plain text (stub, minimal implementation)
+- `coloured_text.rs` - Colorized terminal output with risk scoring visualization (fully implemented)
+- `json.rs` - JSON serialization for structured output (fully implemented)
+- `text.rs` - Plain text formatter for non-color terminals
 
-All implement the `OutputFormatter` trait from `src/output/mod.rs`.
+All implement the `Formatter` trait from `src/output/mod.rs`:
+```rust
+pub trait Formatter {
+    fn format_report(&self, report: &AnalysisReport) -> String;
+}
+```
 
 ### Module Map
 
@@ -179,35 +227,51 @@ src/
 │   ├── heuristics.rs
 │   ├── typosquat.rs
 │   ├── guarddog.rs
-│   └── llm.rs
-├── feed/           # PyPI RSS integration
+│   ├── llm.rs
+│   ├── package.rs  # Package download & extraction utilities
+│   └── ollama_utils.rs # Ollama model checking and pulling
+├── cli/            # Command-line interface
+│   ├── mod.rs     # CLI command routing
+│   └── args.rs    # Argument parsing (clap derive)
+├── feed/          # PyPI RSS integration
 │   ├── mod.rs     # fetch_rss, serialize_packages, watch_feed
-│   └── pypi.rs    # PythonPackage struct
+│   ├── pypi.rs    # PythonPackage struct
+│   └── package.rs # Additional package utilities
 ├── output/        # Result formatting
-│   ├── mod.rs     # AnalysisReport, OutputFormatter trait
+│   ├── mod.rs     # AnalysisReport, Formatter trait
 │   ├── webhook.rs # Slack/webhook integration
 │   ├── tui.rs     # Terminal UI (minimal)
 │   └── formatters/
+│       ├── mod.rs
+│       ├── coloured_text.rs
+│       ├── json.rs
+│       └── text.rs
 └── config/        # Configuration parsing
-    └── mod.rs     # Config, PipelineConfig structs
+    └── mod.rs     # Config, PipelineConfig, CacheConfig structs
 
 config/             # Runtime config files (not in version control)
 ├── config.toml
 ├── heuristics.toml
-└── data/           # Runtime state
+└── data/           # Runtime state (cache, etc.)
 ```
 
 ## Development Guidelines
 
 ### Package Download & Extraction (For GuardDog/LLM)
 
-Both `guarddog.rs` and `llm.rs` require downloading PyPI packages. The implementation pattern should:
-1. Download `.tar.gz` from PyPI using `reqwest`
-2. Extract using `flate2` (decompression) + `tar` (archive)
-3. Walk directory with `walkdir` to find `.py` files
-4. Pass source code to analysis stage
+Package download and extraction logic is centralized in `src/analysis/package.rs` (`PackageContents` struct):
+1. Checks pip cache first (from `PIP_CACHE_DIR` env var) to avoid re-downloading
+2. Falls back to downloading `.tar.gz` from PyPI using `reqwest`
+3. Extracts using `flate2` (decompression) + `tar` (archive)
+4. Walks directory with `walkdir` to find `.py` files
+5. Returns `PackageContents` struct with extracted file paths and temporary directory
 
-See existing code using `tempfile`, `walkdir`, `tar`, and `flate2` for reference.
+Key components:
+- `try_find_in_pip_cache()` - Searches pip cache directories (http-v2/, http/)
+- `download_package()` - Downloads from PyPI if not in cache
+- `extract_python_files()` - Extracts and collects .py files from archives
+
+The cache directory is configurable via `[cache]` section in config.toml and set via `PIP_CACHE_DIR` environment variable before analysis runs.
 
 ### Adding New Heuristic Rules
 
@@ -265,21 +329,24 @@ Most functions return `Result<T, Box<dyn std::error::Error>>`. Errors are logged
 
 ## Incomplete Features (TODOs)
 
-1. **GuardDog integration** - Stub only, needs:
-   - Package download logic
-   - Semgrep rule integration
-   - Result parsing
+1. **GuardDog integration** - Pattern-based code scanning (disabled by default)
+   - Semgrep rule integration needs completion
+   - Currently a stub - needs actual pattern matching implementation
 
-2. **LLM code extraction** - Stub only, needs:
-   - Extracting Python source from packages
-   - Handling multi-file packages
-   - Streaming responses from Ollama
+2. **LLM code extraction & analysis** - Semantic analysis via Ollama (disabled by default)
+   - Package extraction implemented in `analysis/package.rs`
+   - Core LLM analysis in `src/analysis/llm.rs` with prompt injection detection
+   - Ollama model checking in `analysis/ollama_utils.rs`
+   - Additional improvements for large packages and streaming responses
 
-3. **Scan command** - CLI routing exists but handler unimplemented
-   - Should load config, download/analyze package, output result
+3. **Scan command** - CLI routing exists but handler incomplete
+   - `handle_scan()` in `src/main.rs` marked as TODO
+   - Should load config, download/analyze single package, output result
 
-4. **TUI mode** - Minimal implementation
-   - Config option exists but not fully built out
+4. **TUI mode** - Minimal implementation in `src/output/tui.rs`
+   - Config option exists (`enable_tui`)
+   - Not fully built out - mostly placeholder code
 
-5. **Text formatter** - Only JSON and colored output fully implemented
-   - Need plain text version for non-color terminals
+5. **Text formatter** - Plain text version exists but may need enhancement
+   - JSON and colored output fully implemented
+   - Plain text version in `src/output/formatters/text.rs` available

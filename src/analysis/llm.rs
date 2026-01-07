@@ -23,6 +23,32 @@ pub struct PromptInjectionDetection {
     pub evidence: Vec<String>,
 }
 
+/// Health check for Ollama availability
+async fn check_ollama_health_from_url(url: &str) -> Result<(), Box<dyn Error>> {
+    let health_url = if url.ends_with('/') {
+        format!("{}api/tags", url)
+    } else {
+        format!("{}/api/tags", url)
+    };
+
+    log::debug!("LLM: Checking Ollama health at: {}", health_url);
+
+    match reqwest::get(&health_url).await {
+        Ok(response) => {
+            if response.status().is_success() {
+                log::debug!("LLM: Ollama is healthy");
+                Ok(())
+            } else {
+                Err(format!("Ollama health check failed: HTTP {}", response.status()).into())
+            }
+        }
+        Err(e) => {
+            Err(format!("Cannot connect to Ollama at {}: {}", url, e).into())
+        }
+    }
+}
+
+
 /// Sentinel: Detect prompt injection attempts in code (runs BEFORE main analysis)
 /// This acts as a gatekeeper - if injection is detected, main analysis should be skipped
 pub async fn detect_prompt_injection(
@@ -30,18 +56,54 @@ pub async fn detect_prompt_injection(
     code_snippet: &str,
     config: &LlmConfig,
 ) -> Result<PromptInjectionDetection, Box<dyn Error>> {
-    let (host, port) = config.parse_endpoint()?;
-    let ollama = Ollama::new(host, port);
+    log::debug!("LLM: Initializing Ollama client");
+    log::debug!("LLM: Endpoint from config: {}", config.endpoint);
+    log::debug!("LLM: Model: {}", config.model);
+    log::debug!("LLM: Request timeout: {}s", config.request_timeout);
+
+    // Construct full URL for Ollama (ollama-rs expects complete URL)
+    let url = if config.endpoint.starts_with("http://") || config.endpoint.starts_with("https://") {
+        config.endpoint.clone()
+    } else {
+        format!("http://{}", config.endpoint)
+    };
+
+    log::debug!("LLM: Ollama URL: {}", url);
+
+    // Check if Ollama is accessible before trying to initialize client
+    if let Err(e) = check_ollama_health_from_url(&url).await {
+        log::error!("LLM: Ollama health check failed: {}", e);
+        return Err(e);
+    }
+
+    // Ensure model is available (auto-pull if needed)
+    if let Err(e) = super::ollama_utils::check_model_available(&url, &config.model, true).await {
+        log::warn!("LLM: Could not ensure model availability: {}", e);
+        // Don't fail - maybe the model exists but check failed
+    }
+
+    let ollama = Ollama::new(url, 11434);
+    log::debug!("LLM: Ollama client initialized successfully");
+
     let prompt = build_sentinel_prompt(package_name, code_snippet);
+    log::debug!("LLM: Running sentinel injection detection");
+
     let request = GenerationRequest::new(
         config.model.clone(),
         prompt,
     );
 
-    let response = ollama.generate(request).await?;
-    let result = parse_sentinel_response(&response.response)?;
-
-    Ok(result)
+    match ollama.generate(request).await {
+        Ok(response) => {
+            log::debug!("LLM: Received response from Ollama");
+            let result = parse_sentinel_response(&response.response)?;
+            Ok(result)
+        }
+        Err(e) => {
+            log::error!("LLM: Ollama generation failed: {:?}", e);
+            Err(format!("Ollama generation failed: {:?}", e).into())
+        }
+    }
 }
 
 /// Analyze package code using LLM (Tier 2 analysis)
@@ -50,18 +112,54 @@ pub async fn analyze_package_code(
     code_snippet: &str,
     config: &LlmConfig,
 ) -> Result<LlmAnalysisResult, Box<dyn Error>> {
-    let (host, port) = config.parse_endpoint()?;
-    let ollama = Ollama::new(host, port);
+    log::debug!("LLM: Starting semantic code analysis");
+    log::debug!("LLM: Endpoint from config: {}", config.endpoint);
+    log::debug!("LLM: Model: {}", config.model);
+    log::debug!("LLM: Request timeout: {}s", config.request_timeout);
+
+    // Construct full URL for Ollama (ollama-rs expects complete URL)
+    let url = if config.endpoint.starts_with("http://") || config.endpoint.starts_with("https://") {
+        config.endpoint.clone()
+    } else {
+        format!("http://{}", config.endpoint)
+    };
+
+    log::debug!("LLM: Ollama URL: {}", url);
+
+    // Check if Ollama is accessible before trying to initialize client
+    if let Err(e) = check_ollama_health_from_url(&url).await {
+        log::error!("LLM: Ollama health check failed: {}", e);
+        return Err(e);
+    }
+
+    // Ensure model is available (auto-pull if needed)
+    if let Err(e) = super::ollama_utils::check_model_available(&url, &config.model, true).await {
+        log::warn!("LLM: Could not ensure model availability: {}", e);
+        // Don't fail - maybe the model exists but check failed
+    }
+
+    let ollama = Ollama::new(url, 11434);
+    log::debug!("LLM: Ollama client initialized successfully");
+
     let prompt = build_analysis_prompt(package_name, code_snippet);
     let request = GenerationRequest::new(
         config.model.clone(),
         prompt,
     );
 
-    let response = ollama.generate(request).await?;
-    let result = parse_llm_response(&response.response)?;
+    log::debug!("LLM: Sending analysis request to Ollama");
 
-    Ok(result)
+    match ollama.generate(request).await {
+        Ok(response) => {
+            log::debug!("LLM: Received analysis response from Ollama");
+            let result = parse_llm_response(&response.response)?;
+            Ok(result)
+        }
+        Err(e) => {
+            log::error!("LLM: Ollama generation failed: {:?}", e);
+            Err(format!("Ollama generation failed: {:?}", e).into())
+        }
+    }
 }
 
 /// Build sentinel prompt to detect prompt injection attempts
@@ -155,8 +253,8 @@ fn parse_sentinel_response(response: &str) -> Result<PromptInjectionDetection, B
         || lower.contains("injection_detected:yes")
         || (lower.contains("injection") && lower.contains("yes"));
 
-    // Extract confidence score
-    let confidence = extract_confidence(response).unwrap_or(if injection_detected { 0.7 } else { 0.5 });
+    // Extract confidence score (0-100 scale)
+    let confidence = extract_confidence(response).unwrap_or(if injection_detected { 70.0 } else { 50.0 });
 
     // Extract evidence
     let evidence = extract_evidence(response);
@@ -181,11 +279,11 @@ fn parse_llm_response(response: &str) -> Result<LlmAnalysisResult, Box<dyn Error
     let reasoning = extract_reasoning(response)
         .unwrap_or_else(|| response.to_string());
 
-    // Calculate confidence based on how well-formatted the response is
+    // Calculate confidence based on how well-formatted the response is (0-100 scale)
     let confidence = if reasoning.len() > 10 && risk_score > 0 {
-        0.8
+        80.0
     } else {
-        0.5
+        50.0
     };
 
     Ok(LlmAnalysisResult {
@@ -243,7 +341,7 @@ fn extract_reasoning(response: &str) -> Option<String> {
     }
 }
 
-/// Extract confidence score from sentinel response
+/// Extract confidence score from sentinel response (returns 0-100 scale)
 fn extract_confidence(response: &str) -> Option<f32> {
     for line in response.lines() {
         let lower = line.to_lowercase();
@@ -251,9 +349,10 @@ fn extract_confidence(response: &str) -> Option<f32> {
         if lower.starts_with("confidence:")
             && let Some(colon_pos) = line.find(':') {
                 let after_colon = line[colon_pos + 1..].trim();
-                // Try to parse as float
+                // Try to parse as float (LLM returns 0.0-1.0, we scale to 0-100)
                 if let Ok(conf) = after_colon.parse::<f32>() {
-                    return Some(conf.clamp(0.0, 1.0));
+                    let scaled = (conf.clamp(0.0, 1.0)) * 100.0;
+                    return Some(scaled);
                 }
             }
     }
@@ -313,8 +412,8 @@ mod tests {
 
     #[test]
     fn test_extract_confidence() {
-        assert_eq!(extract_confidence("CONFIDENCE: 0.95"), Some(0.95));
-        assert_eq!(extract_confidence("Confidence: 0.5"), Some(0.5));
+        assert_eq!(extract_confidence("CONFIDENCE: 0.95"), Some(95.0));
+        assert_eq!(extract_confidence("Confidence: 0.5"), Some(50.0));
         // "confidence is 0.8" doesn't start with "confidence:" so should return None
         assert_eq!(extract_confidence("confidence is 0.8"), None);
         assert_eq!(extract_confidence("no confidence here"), None);
@@ -344,7 +443,7 @@ mod tests {
         let resp = "INJECTION_DETECTED: yes\nCONFIDENCE: 0.9\nEVIDENCE: ignore instructions, fake safety claim";
         let result = parse_sentinel_response(resp).unwrap();
         assert!(result.injection_detected);
-        assert_eq!(result.confidence, 0.9);
+        assert_eq!(result.confidence, 90.0);
         assert_eq!(result.evidence.len(), 2);
     }
 
@@ -353,7 +452,7 @@ mod tests {
         let resp = "INJECTION_DETECTED: no\nCONFIDENCE: 0.95\nEVIDENCE: none";
         let result = parse_sentinel_response(resp).unwrap();
         assert!(!result.injection_detected);
-        assert_eq!(result.confidence, 0.95);
+        assert_eq!(result.confidence, 95.0);
         assert_eq!(result.evidence.len(), 0);
     }
 }

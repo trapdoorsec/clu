@@ -13,14 +13,15 @@ struct PopularPackagesResponse {
     #[allow(dead_code)]
     source: String,
     #[allow(dead_code)]
-    meta: Vec<String>,
+    #[serde(default)]
+    meta: serde_json::Value,  // Changed from Vec<String> to accept any format
     rows: Vec<PackageRow>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct PackageRow {
     #[allow(dead_code)]
-    download_count: String,
+    download_count: u64,  // Changed from String to u64 (actual API returns integer)
     project: String,
 }
 
@@ -33,28 +34,49 @@ pub struct TypoSquatterMatch {
     pub legit_package_name: String,
 }
 
-async fn get_popular_packages(conf: &FeedConfig) -> Result<Vec<PackageRow>, Box<dyn Error>> {
+async fn get_popular_packages(conf: &FeedConfig) -> Vec<PackageRow> {
     let url = &conf.popular_packages_endpoint;
 
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| format!("Failed to fetch popular packages list: {}", e))?;
+    log::debug!("Fetching popular packages from: {}", url);
 
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to fetch popular packages - HTTP {}: {}",
-            response.status(),
-            url
-        ).into());
+    // Attempt to fetch popular packages, but gracefully degrade if endpoint is unavailable
+    match reqwest::get(url).await {
+        Ok(response) => {
+            let status = response.status();
+            if !status.is_success() {
+                match response.text().await {
+                    Ok(body) => {
+                        log::warn!("HTTP {} from popular packages endpoint", status);
+                        log::warn!("Response (first 200 chars): {}",
+                                  if body.len() > 200 { &body[..200] } else { &body });
+                    }
+                    Err(e) => {
+                        log::warn!("HTTP {} - could not read response body: {}", status, e);
+                    }
+                }
+                log::info!("Typosquat detection disabled - endpoint unavailable");
+                return Vec::new();
+            }
+
+            match response.json::<PopularPackagesResponse>().await {
+                Ok(json) => {
+                    log::debug!("Successfully fetched {} popular packages", json.rows.len());
+                    json.rows.into_iter().take(1000).collect()
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse popular packages JSON: {}", e);
+                    log::debug!("JSON parse error details: {:?}", e);
+                    log::info!("Typosquat detection disabled - invalid response format");
+                    Vec::new()
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch popular packages list: {}", e);
+            log::info!("Typosquat detection disabled - network error");
+            Vec::new()
+        }
     }
-
-    let json: PopularPackagesResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse popular packages JSON: {}", e))?;
-
-    let top_1000: Vec<PackageRow> = json.rows.into_iter().take(1000).collect();
-    Ok(top_1000)
 }
 
 /// Calculate Levenshtein distance between two strings (uses references - no cloning)
@@ -87,8 +109,14 @@ pub async fn find_typosquatters(
     let threshold = config.analysis.typosquat_distance_threshold;
     let min_len = config.analysis.min_package_length;
 
-    // Fetch popular packages once
-    let popular_packages = get_popular_packages(&config.feed).await?;
+    // Fetch popular packages - gracefully degrades to empty list if endpoint unavailable
+    let popular_packages = get_popular_packages(&config.feed).await;
+
+    if popular_packages.is_empty() {
+        log::warn!("Typosquat stage skipped - no popular packages available for comparison");
+        return Ok(Vec::new());
+    }
+
     let mut typosquats: Vec<TypoSquatterMatch> = Vec::new();
 
     // Iterate over new packages

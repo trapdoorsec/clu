@@ -127,10 +127,15 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 - **Inputs:** Package source code
 - **Outputs:** Pattern matches with severity levels
 
-**Status:** Stub implementation (TODO: requires package download)
+**Status:** Configured but incomplete (pattern matching integration needed)
+
+**Current Implementation:**
+- Package download & extraction in `analysis/package.rs` (complete)
+- Semgrep rule integration (TODO: needs pattern matching logic)
+- Risk scoring to be implemented
 
 **Planned Behavior:**
-- Downloads package from PyPI
+- Downloads package from PyPI (or uses pip cache)
 - Extracts source files
 - Runs Semgrep rules to detect malicious patterns
 - Risk scoring:
@@ -144,17 +149,24 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 - **Speed:** Very slow (~seconds per package)
 - **Default:** Disabled
 - **Inputs:** Extracted Python source code
-- **Outputs:** LLM verdict + confidence score
+- **Outputs:** LLM verdict + confidence score + injection detection
 
-**Status:** Stub implementation (TODO: requires package download)
+**Status:** Partially implemented
 
-**Planned Behavior:**
-- Downloads package from PyPI
+**Current Implementation:**
+- Core LLM analysis in `src/analysis/llm.rs` (complete with injection detection)
+- Package download & extraction in `analysis/package.rs` (complete)
+- Ollama health check & model management in `analysis/ollama_utils.rs` (complete)
+- Prompt injection detection sentinel (implemented)
+
+**Behavior:**
+- Downloads package from PyPI (or uses pip cache)
 - Extracts Python source code
-- Sends code to Ollama (qwen2.5-coder model)
-- LLM analyzes for malicious behavior
-- Extracts risk score (0-100) from response
-- Includes injection detection sentinel
+- Sends code to Ollama (qwen2.5-coder model or configured alternative)
+- LLM analyzes for malicious behavior patterns
+- Detects prompt injection attempts
+- Returns risk score (0-100), reasoning, and confidence
+- Includes `PromptInjectionDetection` struct with evidence
 
 ### 3. Configuration System (`src/config/`)
 
@@ -165,11 +177,13 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 [feed]
 endpoint = "https://pypi.org/rss/packages.xml"
 poll_interval = "30s"
-popular_packages_endpoint = "https://hugovk.github.io/..."
+check_updates = false
+popular_packages_endpoint = "https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.min.json"
 
 [llm]
 endpoint = "http://localhost:11434"  # Ollama
 model = "qwen2.5-coder:7b"
+request_timeout = 30
 
 [analysis]
 typosquat_distance_threshold = 2
@@ -178,13 +192,16 @@ min_package_length = 4
 [output]
 log_level = "info"
 enable_tui = false
-# webhook = "https://hooks.slack.com/..."  # Optional
+webhook = "https://hooks.slack.com/..."  # For alerts
+
+[cache]
+pip_cache_dir = "/tmp/pip-cache"  # For storing downloaded packages
 
 [pipeline]
-heuristics = true    # Enable Stage 1
-typosquat = true     # Enable Stage 2
-guarddog = false     # Enable Stage 3
-llm = false          # Enable Stage 4
+heuristics = true    # Enable Stage 1 (default: true)
+typosquat = true     # Enable Stage 2 (default: true)
+guarddog = false     # Enable Stage 3 (default: false)
+llm = false          # Enable Stage 4 (default: false)
 ```
 
 **Pipeline Config:**
@@ -208,13 +225,13 @@ pub struct AnalysisReport {
     pub package_version: Option<String>,
     pub timestamp: String,
     pub heuristic_matches: Vec<HeuristicMatch>,
-    pub typosquat_matches: Vec<TyposquatMatch>,
-    pub injection_detection: Option<InjectionDetection>,
-    pub llm_analysis: Option<LLMAnalysis>,
+    pub typosquat_matches: Vec<TypoSquatterMatch>,
+    pub injection_detection: Option<PromptInjectionDetection>,
+    pub llm_analysis: Option<LlmAnalysisResult>,
     pub guarddog_result: Option<GuardDogResult>,
     pub overall_risk_score: u8,
     pub is_malicious: bool,
-    pub recommendation: String,
+    pub recommendation: String,  // "SAFE", "REVIEW", "BLOCK"
 }
 ```
 
@@ -252,8 +269,7 @@ risk_score = min(risk_score, 100)  // Cap at 100
 **Recommendation Tiers:**
 - **0-30:** SAFE (green) - Monitor only
 - **31-70:** REVIEW (yellow) - Investigate recommended
-- **71-85:** BLOCK (red) - High likelihood of malicious code
-- **86-100:** CRITICAL (purple) - Immediate action required
+- **71-100:** BLOCK (red) - High likelihood of malicious code, immediate action required
 
 ## Data Flow
 
@@ -352,40 +368,49 @@ risk_score = min(risk_score, 100)  // Cap at 100
 
 ```
 src/
-├── main.rs              # CLI entry point, watch/scan commands
+├── main.rs              # CLI entry point, watch/scan command routing
 ├── lib.rs               # Library exports
-├── init.rs              # Interactive config setup
+├── init.rs              # Interactive config setup (dialoguer prompts)
 ├── glitch.rs            # Matrix-style banner animation
 ├── analysis/
-│   ├── mod.rs          # Analysis orchestration
+│   ├── mod.rs          # Analysis orchestration & pipeline
 │   ├── heuristics.rs   # Rule-based metadata analysis
 │   ├── typosquat.rs    # Levenshtein distance matching
-│   ├── guarddog.rs     # Pattern-based scanning (stub)
-│   └── llm.rs          # LLM semantic analysis (stub)
+│   ├── guarddog.rs     # Pattern-based scanning
+│   ├── llm.rs          # LLM semantic analysis with injection detection
+│   ├── package.rs      # Package download & extraction utilities
+│   └── ollama_utils.rs # Ollama model checking and management
+├── cli/
+│   ├── mod.rs          # CLI command routing
+│   └── args.rs         # Argument parsing (clap derive)
 ├── feed/
-│   ├── mod.rs          # RSS feed fetching
-│   └── pypi.rs         # PyPI package data structures
+│   ├── mod.rs          # RSS feed fetching & parsing
+│   ├── pypi.rs         # PyPI package data structures
+│   └── package.rs      # Additional package utilities
 ├── output/
-│   ├── mod.rs          # Output trait & report structures
+│   ├── mod.rs          # AnalysisReport & Formatter trait
+│   ├── webhook.rs      # Webhook integration (Slack, etc.)
+│   ├── tui.rs          # Terminal UI (minimal)
 │   └── formatters/
+│       ├── mod.rs
 │       ├── coloured_text.rs   # Terminal color output
 │       ├── json.rs            # JSON serialization
-│       └── text.rs            # Plain text (stub)
-├── config/
-│   └── mod.rs          # Configuration loading & structures
-└── cli.rs              # CLI helpers (empty)
+│       └── text.rs            # Plain text formatter
+└── config/
+    └── mod.rs          # Configuration loading & structures (Config, PipelineConfig, CacheConfig)
 
 config/
 ├── config.toml         # Runtime configuration
-├── heuristics.toml     # Rule definitions
-└── data/               # Runtime state (logs, cache, etc.)
+├── heuristics.toml     # Heuristic rule definitions
+└── data/               # Runtime state (optional, for caching)
 ```
 
 ## Future Enhancements
 
-1. **Package Download & Extraction**
-   - Required for GuardDog and LLM analysis
-   - Secure sandbox for untrusted code
+1. **GuardDog Pattern Matching Completion**
+   - Package download & extraction ✅ (done)
+   - Semgrep pattern integration (in progress)
+   - Risk score mapping (TODO)
 
 2. **Database Persistence**
    - Store analysis history
@@ -441,4 +466,4 @@ config/
 
 ---
 
-*Last Updated: 2026-01-06*
+*Last Updated: 2026-01-07*

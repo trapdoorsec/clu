@@ -46,8 +46,11 @@ Results → Webhook (Slack) + Log Aggregator (ELK/Splunk/CloudWatch)
 git clone https://github.com/akses/clu.git
 cd clu
 
-# 2. Create initial config (generates config.toml interactively)
-docker-compose run --rm clu clu init
+# 2. Build Docker image
+make docker-build
+
+# 3. Create initial config (generates config.toml interactively)
+make docker-init
 
 # During setup, you'll be prompted for:
 # - PyPI feed endpoint
@@ -55,14 +58,14 @@ docker-compose run --rm clu clu init
 # - Webhook URL for alerts (REQUIRED - results are ephemeral)
 # - Which analysis stages to enable
 
-# 3. Start the service
-docker-compose up -d
+# 4. Start the service
+make docker-up
 
-# 4. View real-time analysis logs
-docker-compose logs -f clu
+# 5. View real-time analysis logs
+make docker-logs
 
-# 5. Check that Ollama model loaded (if LLM enabled)
-docker-compose logs ollama | grep "model loaded"
+# 6. Check that Ollama model loaded (if LLM enabled)
+make docker-logs-ollama | grep "model loaded"
 ```
 
 **⚠️ Important**: Configure webhook in `config.toml` or results will be lost!
@@ -79,6 +82,9 @@ webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 ```bash
 # Build Docker image
 make docker-build
+
+# Interactive config setup (first time only)
+make docker-init
 
 # Start containers
 make docker-up
@@ -128,6 +134,48 @@ docker-compose down -v
 1. **Webhook** (real-time alerts to Slack, Teams, custom endpoint)
 2. **Docker logs** (available via `docker logs` + log drivers)
 3. **Log aggregators** (ELK Stack, Splunk, CloudWatch - see STORAGE.md)
+
+### Cleanup & Disk Space Management
+
+Docker images and containers can consume significant disk space. Use these commands to clean up:
+
+**Safe cleanup (recommended):**
+```bash
+# Remove CLU and Ollama images + prune unused layers
+make docker-clean
+```
+
+This:
+- Stops and removes all containers
+- Deletes volumes (but keeps downloaded Ollama models in Docker volumes)
+- Removes CLU and Ollama images
+- Prunes dangling images
+
+**Aggressive cleanup (removes everything):**
+```bash
+# Complete Docker cleanup - only use if you want to free maximum space
+make docker-clean-aggressive
+```
+
+This:
+- Removes ALL unused Docker images, containers, networks, and volumes
+- Requires rebuilding everything from scratch
+- Frees the most disk space
+
+**Manual cleanup:**
+```bash
+# Stop all containers
+docker-compose down -v
+
+# Remove specific images
+docker image rm clu-scanner ollama/ollama
+
+# Prune unused images
+docker image prune -f
+
+# Full system cleanup (aggressive)
+docker system prune -af --volumes
+```
 
 ## Security: Running as Non-Root User
 
@@ -267,7 +315,7 @@ Each analysis stage can be enabled (`true`) or disabled (`false`):
 |-------|-------|---|---|---|
 | **Heuristics** | ~ms | ✅ Yes | None | Fast metadata rules |
 | **Typosquat** | ~100ms | ✅ Yes | Network (external API) | Levenshtein similarity |
-| **GuardDog** | ~1-2s | ❌ No | `guarddog` CLI tool | Pattern-based scanning |
+| **GuardDog** | ~1-2s | ❌ No | None (included in Docker) | Pattern-based scanning |
 | **LLM** | ~2-5s | ❌ No | Ollama + model | Semantic analysis + injection detection |
 
 **Example Configurations:**
@@ -297,8 +345,8 @@ llm = true
 
 **To enable GuardDog:**
 ```bash
-# 1. Install guarddog (already included in Docker image)
-pip install guarddog
+# 1. GuardDog is already included in the Docker image
+# (For manual installation: pip install guarddog)
 
 # 2. Enable in config.toml
 [pipeline]
@@ -344,10 +392,9 @@ description = "Very short package name"
 
 | Score | Level | Meaning | Action |
 |-------|-------|---------|--------|
-| 0-30 | **LOW** (green) | Safe package | Monitor |
-| 31-60 | **MED** (yellow) | Review recommended | Investigate |
-| 61-85 | **HIGH** (red) | Likely malicious | Block/Warn |
-| 86-100 | **CRIT** (purple) | Critical threat | Immediate action |
+| 0-30 | **SAFE** (green) | Safe package | Monitor |
+| 31-70 | **REVIEW** (yellow) | Review recommended | Investigate |
+| 71-100 | **BLOCK** (red) | Likely malicious | Block/Immediate action |
 
 ## Example Output
 
@@ -363,7 +410,7 @@ Analysis Methods:
   [x] LLM Analysis
   [·] GuardDog (skipped)
 
-Risk Level: HIGH (72)
+Risk Level: BLOCK (72)
 Recommendation: BLOCK
 
 Heuristic Matches:
@@ -578,3 +625,7 @@ cargo clean
 ## License
 
 MIT
+
+---
+
+*Last Updated: 2026-01-07*

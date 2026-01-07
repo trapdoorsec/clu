@@ -118,7 +118,7 @@ impl Formatter for ColouredTextFormatter {
             output.push_str(&format!("\n{}\n", "Typosquat Matches:".bright_white().bold()));
             for typo in &report.typosquat_matches {
                 output.push_str(&format!(
-                    "  {} Similar to: {} (confidence: {:.1}%)\n",
+                    "  {} Similar to: {} (confidence: {:.0}%)\n",
                     "•".red(),
                     typo.legit_package_name.yellow(),
                     typo.confidence
@@ -146,7 +146,7 @@ impl Formatter for ColouredTextFormatter {
                 output.push_str(&format!("  {} {}\n", "Reasoning:".bright_white(), llm.reasoning));
             }
             output.push_str(&format!(
-                "  {} {:.1}%\n",
+                "  {} {:.0}%\n",
                 "Confidence:".bright_white(),
                 llm.confidence
             ));

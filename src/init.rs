@@ -1,7 +1,6 @@
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use crate::glitch::matrix_glitch;
 
 struct ConfigValues {
@@ -11,6 +10,8 @@ struct ConfigValues {
     check_updates: bool,
     llm_endpoint: String,
     llm_model: String,
+    llm_request_timeout: u64,
+    pip_cache_dir: String,
     typosquat_threshold: usize,
     min_package_length: usize,
     webhook: Option<String>,
@@ -71,7 +72,7 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
 
     let llm_endpoint: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("LLM endpoint (e.g., Ollama)")
-        .default("http://localhost:11434".to_string())
+        .default("http://ollama:11434".to_string())
         .interact_text()?;
 
     let model_options = [
@@ -97,11 +98,25 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         model_options[model_selection].1.to_string()
     };
 
+    let llm_request_timeout: u64 = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("LLM request timeout (seconds)")
+        .default(30)
+        .interact_text()?;
+
     // Check if model exists on Ollama server
     if let Err(e) = check_and_download_model(&llm_endpoint, &llm_model).await {
         eprintln!("⚠ Warning: {}", e);
         println!("You can download it later with: ollama pull {}", llm_model);
     }
+
+    // === Cache Configuration ===
+    matrix_glitch("\n.:* Cache Configuration\n", 10, use_color);
+    println!("Configure caching for package downloads.\n");
+
+    let pip_cache_dir: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Pip package cache directory (used by GuardDog and LLM)")
+        .default("/tmp/pip-cache".to_string())
+        .interact_text()?;
 
     // === Analysis Configuration ===
     matrix_glitch("\n.:* Analysis Configuration\n", 10, use_color);
@@ -187,6 +202,8 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         check_updates,
         llm_endpoint,
         llm_model,
+        llm_request_timeout,
+        pip_cache_dir,
         typosquat_threshold,
         min_package_length,
         webhook,
@@ -245,6 +262,14 @@ endpoint = "{}"
 # Model name to use for analysis
 model = "{}"
 
+# Request timeout in seconds for LLM requests (default: 30)
+request_timeout = {}
+
+[cache]
+# Directory for caching pip packages (used by GuardDog and LLM)
+# Allows reusing packages across analysis stages to avoid redundant downloads
+pip_cache_dir = "{}"
+
 [analysis]
 # Maximum Levenshtein distance for typosquatting detection
 # 1 = very strict, 2 = moderate (recommended), 3+ = lenient
@@ -283,6 +308,8 @@ llm = {}
         config.check_updates,
         config.llm_endpoint,
         config.llm_model,
+        config.llm_request_timeout,
+        config.pip_cache_dir,
         config.typosquat_threshold,
         config.min_package_length,
         webhook_line,
@@ -295,59 +322,26 @@ llm = {}
     )
 }
 
-/// Check if a model exists on Ollama server, and offer to download it if not
-async fn check_and_download_model(_endpoint: &str, model_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n.:* Checking if model '{}' is available...", model_name);
+/// Check if a model exists on Ollama server via HTTP API
+async fn check_and_download_model(endpoint: &str, model_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::analysis;
 
-    // Check if ollama CLI is available
-    let ollama_check = Command::new("ollama")
-        .arg("list")
-        .output();
+    println!("\n.:* Checking if model '{}' is available at {}...", model_name, endpoint);
 
-    if ollama_check.is_err() {
-        return Err("Ollama CLI not found. Please install Ollama from https://ollama.ai".into());
-    }
-
-    // Get list of installed models
-    let output = ollama_check?;
-    let output_str = String::from_utf8_lossy(&output.stdout);
-
-    // Check if model is in the list
-    let model_exists = output_str.lines().any(|line| {
-        line.to_lowercase().contains(&model_name.to_lowercase())
-    });
-
-    if model_exists {
-        println!(".oO0( Model '{}' is already installed )", model_name);
-        return Ok(());
-    }
-
-    // Model not found, ask user if they want to download
-    println!("⚠ Model '{}' not found on Ollama server", model_name);
-
-    let should_download = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Would you like to download '{}' now? (This may take a while depending on model size)", model_name))
-        .default(true)
-        .interact()?;
-
-    if !should_download {
-        return Err(format!("Model '{}' not installed. You can install it later with: ollama pull {}", model_name, model_name).into());
-    }
-
-    // Download the model
-    println!(">> Downloading model '{}'... This may take several minutes.", model_name);
-    println!("   (You can cancel with Ctrl+C and download later with: ollama pull {})", model_name);
-
-    let pull_result = Command::new("ollama")
-        .arg("pull")
-        .arg(model_name)
-        .status()?;
-
-    if pull_result.success() {
-        println!(".oO0( Model '{}' downloaded successfully!)", model_name);
-        Ok(())
+    // Normalize endpoint URL
+    let endpoint_url = if endpoint.contains("://") {
+        endpoint.to_string()
     } else {
-        Err(format!("Failed to download model '{}'. Please try manually: ollama pull {}", model_name, model_name).into())
+        format!("http://{}", endpoint)
+    };
+
+    // Use shared utility - don't auto-pull during init, just check
+    match analysis::ollama_utils::check_model_available(&endpoint_url, model_name, false).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            println!("⚠ Model check failed: {}", e);
+            Ok(()) // Don't fail - user might have model already
+        }
     }
 }
 
@@ -362,8 +356,10 @@ mod tests {
             popular_packages_endpoint: "https://example.com/popular.json".to_string(),
             poll_interval: "30s".to_string(),
             check_updates: false,
-            llm_endpoint: "http://localhost:11434".to_string(),
+            llm_endpoint: "http://ollama:11434".to_string(),
             llm_model: "llama2".to_string(),
+            llm_request_timeout: 30,
+            pip_cache_dir: "/tmp/pip-cache".to_string(),
             typosquat_threshold: 2,
             min_package_length: 4,
             webhook: Some("https://webhook.site/test".to_string()),
@@ -393,8 +389,10 @@ mod tests {
             popular_packages_endpoint: "https://example.com/popular.json".to_string(),
             poll_interval: "1m".to_string(),
             check_updates: true,
-            llm_endpoint: "http://localhost:11434".to_string(),
+            llm_endpoint: "http://ollama:11434".to_string(),
             llm_model: "llama2".to_string(),
+            llm_request_timeout: 30,
+            pip_cache_dir: "/tmp/pip-cache".to_string(),
             typosquat_threshold: 2,
             min_package_length: 4,
             webhook: None,

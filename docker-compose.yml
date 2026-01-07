@@ -19,6 +19,10 @@ services:
       # Ollama models (persistent, shared with ollama service)
       - clu-ollama-models:/home/cluuser/.ollama
 
+      # Package cache - shared between GuardDog and LLM analysis
+      # GuardDog downloads packages here, LLM can reuse them
+      - pip-cache:/tmp/pip-cache
+
       # Note: Results are ephemeral - sent to external log aggregators
       # See config.toml [output] webhook for how to configure ELK/Splunk integration
       # Logs are written to stdout/stderr for docker logs and log drivers
@@ -27,6 +31,9 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - RUST_LOG=info
+      # Shared package cache for GuardDog (via pip) and LLM analysis
+      - PIP_CACHE_DIR=/tmp/pip-cache
+      - TMPDIR=/tmp
 
     # Logging: Send to external services (ELK, Splunk, etc)
     # Docker's logging drivers forward stdout/stderr to log aggregators
@@ -113,8 +120,13 @@ services:
 
 # Named volumes for persistent data
 volumes:
-  # Ollama models (only this is a named volume - config is read-only)
+  # Ollama models (persistent across container restarts)
   clu-ollama-models:
+    driver: local
+
+  # Package cache (shared between GuardDog and LLM analysis)
+  # Allows reusing downloaded packages across analysis stages
+  pip-cache:
     driver: local
 
 # Network for inter-service communication
