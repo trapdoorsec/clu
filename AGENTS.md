@@ -127,6 +127,8 @@ pub struct AnalysisReport {
     pub package_name: String,
     pub package_version: Option<String>,
     pub timestamp: String,
+    pub ecosystem: Ecosystem,     // "pypi" | "npm"
+    pub sha256: String,            // hex digest of downloaded artifact
 
     // Tier 1: Heuristics
     pub heuristic_matches: Vec<HeuristicMatch>,
@@ -140,7 +142,7 @@ pub struct AnalysisReport {
     pub guarddog_result: Option<GuardDogResult>,
 
     // Summary
-    pub overall_risk_score: u8,    // 0-100
+    pub severity: u8,    // 1-25 (impact * likelihood)
     pub is_malicious: bool,
     pub recommendation: String,     // "BLOCK", "REVIEW", "SAFE"
 }
@@ -188,6 +190,10 @@ Located in `config.toml`:
 - `[output]` - Log level, TUI enable, webhook URL
 - `[cache]` - Pip package cache directory (used by GuardDog and LLM)
 - `[pipeline]` - Boolean flags for enabling/disabling each stage (heuristics, typosquat, guarddog, llm)
+- `[database]` - SQLite URL, enable/disable
+- `[extraction]` - In-memory limits (max_total_bytes, max_file_bytes, max_entries)
+- `[ecosystems]` - Per-ecosystem toggles (pypi_enabled, npm_enabled)
+- `[sidecar]` - Scanner→API wiring: endpoint, token, timeout_secs, listen_addr
 
 Custom heuristic rules defined in `heuristics.toml` with format:
 ```toml
@@ -218,7 +224,7 @@ pub trait Formatter {
 
 ```
 src/
-├── main.rs          # CLI entry, watch/scan command routing
+├── main.rs          # CLI entry, watch/scan command routing, sidecar POST
 ├── lib.rs           # Library exports
 ├── init.rs          # Interactive config setup (dialoguer prompts)
 ├── glitch.rs        # Matrix-style banner animation
@@ -228,18 +234,29 @@ src/
 │   ├── typosquat.rs
 │   ├── guarddog.rs
 │   ├── llm.rs
-│   ├── package.rs  # Package download & extraction utilities
+│   ├── package.rs  # Package download, in-memory extraction, sha256, source bundles
 │   └── ollama_utils.rs # Ollama model checking and pulling
+├── api/            # Sidecar REST API (clu-api binary)
+│   ├── mod.rs      # Router, AppState, AppError, auth helper
+│   ├── findings.rs # Finding CRUD handlers + DTOs
+│   ├── health.rs   # GET /healthz
+│   └── osm.rs      # OpenSourceMalware report export
+├── bin/
+│   └── clu-api.rs  # Sidecar binary: load config, open DB (WAL), serve axum
 ├── cli/            # Command-line interface
 │   ├── mod.rs     # CLI command routing
 │   └── args.rs    # Argument parsing (clap derive)
-├── feed/          # PyPI RSS integration
+├── feed/          # Feed integration + ecosystem abstraction
 │   ├── mod.rs     # fetch_rss, serialize_packages, watch_feed
+│   ├── ecosystem.rs # Ecosystem enum, PackageRef, PyPIRegistry, NpmRegistry
 │   ├── pypi.rs    # PythonPackage struct
-│   └── package.rs # Additional package utilities
+│   └── npm.rs     # Stub for Phase 3
+├── db/            # SQLite persistence (shared between scanner and API)
+│   ├── mod.rs     # Database struct, analysis_reports, package_status, WAL mode
+│   └── findings.rs # Finding, FindingStatus, FindingFilters, CRUD methods
 ├── output/        # Result formatting
-│   ├── mod.rs     # AnalysisReport, Formatter trait
-│   ├── webhook.rs # Slack/webhook integration
+│   ├── mod.rs     # AnalysisReport (with ecosystem + sha256), Formatter trait
+│   ├── webhook.rs # Scanner → sidecar POST (fire-and-forget)
 │   ├── tui.rs     # Terminal UI (minimal)
 │   └── formatters/
 │       ├── mod.rs
@@ -247,7 +264,7 @@ src/
 │       ├── json.rs
 │       └── text.rs
 └── config/        # Configuration parsing
-    └── mod.rs     # Config, PipelineConfig, CacheConfig structs
+    └── mod.rs     # Config, PipelineConfig, CacheConfig, SidecarConfig structs
 
 config/             # Runtime config files (not in version control)
 ├── config.toml
@@ -260,18 +277,15 @@ config/             # Runtime config files (not in version control)
 ### Package Download & Extraction (For GuardDog/LLM)
 
 Package download and extraction logic is centralized in `src/analysis/package.rs` (`PackageContents` struct):
-1. Checks pip cache first (from `PIP_CACHE_DIR` env var) to avoid re-downloading
-2. Falls back to downloading `.tar.gz` from PyPI using `reqwest`
-3. Extracts using `flate2` (decompression) + `tar` (archive)
-4. Walks directory with `walkdir` to find `.py` files
-5. Returns `PackageContents` struct with extracted file paths and temporary directory
+1. Downloads `.tar.gz` or `.whl` directly from PyPI via `reqwest` (no pip cache, no disk writes)
+2. Computes `sha256` over raw downloaded bytes before extraction
+3. Extracts entirely in-memory using `flate2`/`tar` or `zip` with bounds enforcement (`ExtractionConfig`)
+4. `sanitize_relative_path()` strips `..` and absolute path components (zip-slip defense)
+5. `classify_file()` assigns `FileRole` per ecosystem (EntryScript/Config/Script/Source/Other)
+6. `build_source_bundle()` orders by priority, truncates only low-priority files
+7. Returns `PackageContents { files, ecosystem, sha256 }` — no `TempDir`, no disk writes
 
-Key components:
-- `try_find_in_pip_cache()` - Searches pip cache directories (http-v2/, http/)
-- `download_package()` - Downloads from PyPI if not in cache
-- `extract_python_files()` - Extracts and collects .py files from archives
-
-The cache directory is configurable via `[cache]` section in config.toml and set via `PIP_CACHE_DIR` environment variable before analysis runs.
+The extraction config is in `config.toml` under `[extraction]` (max_total_bytes, max_file_bytes, max_entries).
 
 ### Adding New Heuristic Rules
 
@@ -309,12 +323,27 @@ All I/O operations use Tokio (async/await). Key functions:
 - `fetch_rss()` - HTTP GET with reqwest
 - `analyze_package()` - Orchestrates all analysis stages (can be parallelized)
 
+### Database (SQLite)
+
+- Both `clu` (scanner) and `clu-api` (sidecar) share one SQLite database file
+- WAL mode is enabled per-connection via `SqliteConnectOptions`; foreign keys are enforced
+- `analysis_reports` table: immutable scan evidence, including `ecosystem` and `sha256` columns
+- `findings` table: mutable triage state linked to `analysis_reports(id)` via `report_id` FK
+- Scanner writes `analysis_reports` + `package_status`; API writes `findings`
+- The scanner also POSTs to the sidecar when `[sidecar] endpoint` is configured
+
 ### CLI Arguments
 
 Defined in `src/main.rs` using clap derive macros. Commands:
 - `init` - Calls `handle_init()` from `init.rs`
 - `watch` - Calls `handle_watch()` from `main.rs`
 - `scan <package>` - Calls `handle_scan()` (TODO)
+
+The `clu-api` binary is a separate entry point (`src/bin/clu-api.rs`) that starts the axum HTTP server.
+
+### Sidecar API Safety
+
+**The sidecar stores and serves data only.** No endpoint triggers package acquisition, download, or analysis. The API consumes already-produced `AnalysisReport`s via POST or directly from the SQLite database.
 
 ### Feed Parsing
 

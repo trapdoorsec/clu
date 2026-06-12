@@ -17,7 +17,7 @@ Stage 2: Typosquat (package name similarity)
     ├→ Stage 3: GuardDog (pattern-based code scanning)
     └→ Stage 4: LLM Analysis (semantic AI-based review with injection detection)
     ↓
-Results → Webhook (Slack) + Log Aggregator (ELK/Splunk/CloudWatch)
+Results → Database + Sidecar API + Webhook + Log Aggregator
 ```
 
 **Stage 1 & 2**: Always enabled by default (fast, ~ms to 100ms)
@@ -28,7 +28,7 @@ Results → Webhook (Slack) + Log Aggregator (ELK/Splunk/CloudWatch)
 - GuardDog: Pattern-based code scanning (requires guarddog CLI)
 - LLM: Semantic analysis with prompt injection detection (requires Ollama)
 
-**Results**: Ephemeral by design - sent immediately to webhook & logging services
+**Results**: Persisted to SQLite database, queriable via sidecar API, and forwarded to webhook/logging services
 
 ## Quick Start with Docker (Recommended)
 
@@ -95,6 +95,9 @@ make docker-logs
 # Watch CLU logs only
 make docker-logs-clu
 
+# Watch sidecar API logs
+make docker-logs-api
+
 # Watch Ollama logs only
 make docker-logs-ollama
 
@@ -114,6 +117,9 @@ docker-compose up -d
 # View live analysis output
 docker-compose logs -f clu
 
+# View sidecar API logs
+docker-compose logs -f clu-api
+
 # View Ollama logs (model loading, inference)
 docker-compose logs -f ollama
 
@@ -130,10 +136,12 @@ docker-compose down
 docker-compose down -v
 ```
 
-**Note**: Analysis results are ephemeral - they're sent to:
-1. **Webhook** (real-time alerts to Slack, Teams, custom endpoint)
-2. **Docker logs** (available via `docker logs` + log drivers)
-3. **Log aggregators** (ELK Stack, Splunk, CloudWatch - see STORAGE.md)
+**Analysis results are persisted** to SQLite and served via the sidecar API:
+1. **Database** (SQLite with WAL — both scanner and API share one file)
+2. **Sidecar API** (`clu-api`) for findings triage, search, and OSM export
+3. **Webhook** (real-time alerts to Slack, Teams, custom endpoint)
+4. **Docker logs** (available via `docker logs` + log drivers)
+5. **Log aggregators** (ELK Stack, Splunk, CloudWatch — see STORAGE.md)
 
 ### Cleanup & Disk Space Management
 
@@ -216,13 +224,34 @@ docker-compose exec clu ls -la /home/cluuser/config/
 # ./config.toml:/home/cluuser/config/config.toml:ro
 ```
 
-**Analysis results are ephemeral** (no disk pollution):
-- Results sent to webhook immediately
+**Analysis results are persisted** (no data loss):
+- Results stored in SQLite database (shared between scanner and API)
+- Available via sidecar API for triage, search, and export
+- Also sent to webhook for real-time alerts
 - Logs written to stdout/stderr for Docker log drivers
-- Temp package files auto-cleaned when container stops
 - Ollama models persist in named volume (shared between CLU & Ollama)
 
-See **STORAGE.md** for detailed logging and external service integration.
+### Scanner → API → Triage
+
+The `clu` scanner watches PyPI, analyzes packages, and stores results in SQLite. The `clu-api` sidecar serves a REST API for triage:
+
+```
+clu scanner ──POST /findings──▶ clu-api ──▶ SQLite (WAL)
+     │                              │
+     │                              ├─ GET  /findings          (list/query)
+     │                              ├─ GET  /findings/{id}      (detail)
+     │                              ├─ PATCH /findings/{id}      (triage)
+     │                              └─ GET  /findings/{id}/report (OSM export)
+     │
+     └── also writes directly to SQLite (same DB file, WAL mode)
+```
+
+- Both binaries share one SQLite database via WAL mode (concurrent reads/writes)
+- The scanner POSTs each finding to the sidecar when `[sidecar] endpoint` is configured
+- POST is fire-and-forget (non-blocking, logged on failure)
+- All mutating endpoints (`POST`, `PATCH`) require `Authorization: Bearer <token>`
+- Read endpoints (`GET /findings`, `GET /findings/{id}`, `GET /findings/{id}/report`) also require authentication
+- `GET /healthz` is unauthenticated for liveness probes
 
 ### Resource Limits
 
@@ -252,7 +281,10 @@ Edit `docker-compose.yml` to adjust for your system.
 
 ```bash
 cargo build --release
+# Scanner binary
 ./target/release/clu --help
+# Sidecar API binary
+./target/release/clu-api
 ```
 
 ### Run
@@ -266,6 +298,9 @@ clu watch --poll-interval 30s
 
 # Scan package
 clu scan requests
+
+# Start sidecar API
+clu-api
 ```
 
 ## Configuration
@@ -285,6 +320,7 @@ popular_packages_endpoint = "https://hugovk.github.io/top-pypi-packages/top-pypi
 # Ollama endpoint (required if llm stage enabled)
 endpoint = "http://ollama:11434"  # In Docker: use service name
 model = "qwen2.5-coder:7b"
+request_timeout = 30
 
 [analysis]
 typosquat_distance_threshold = 2    # Levenshtein distance for similarity
@@ -293,18 +329,37 @@ min_package_length = 4              # Skip very short package names
 [output]
 log_level = "info"                  # debug, info, warn, error
 enable_tui = false
-# REQUIRED: Webhook for real-time alerts (results are ephemeral)
+# Webhook for real-time alerts
 webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 
 [pipeline]
-# Enable/disable analysis stages (true = enabled, false = disabled)
-# Stages 1 & 2 are fast (enabled by default)
 heuristics = true       # Fast metadata rules
 typosquat = true        # Similarity detection
+guarddog = false         # Requires 'guarddog' CLI tool installed
+llm = false              # Requires Ollama running with model
 
-# Stages 3 & 4 are slow (disabled by default, require extra setup)
-guarddog = false        # Requires 'guarddog' CLI tool installed
-llm = false             # Requires Ollama running with model
+[database]
+enable = true
+url = "sqlite://config/data/clu.db"
+
+[extraction]
+# In-memory extraction limits (safety bounds)
+max_total_bytes = 67108864    # 64 MiB
+max_file_bytes = 2097152      # 2 MiB
+max_entries = 5000
+
+[ecosystems]
+pypi_enabled = true
+npm_enabled = false           # Stub — not yet implemented
+
+[sidecar]
+# Scanner → API POST configuration. When endpoint is set, the scanner
+# POSTs each AnalysisReport to the sidecar after saving it locally.
+# The clu-api binary serves the findings triage REST API.
+# endpoint = "http://127.0.0.1:8080"
+# token = "shared-secret-here"
+# timeout_secs = 5
+# listen_addr = "127.0.0.1:8080"
 ```
 
 ### Pipeline Configuration Guide
@@ -543,6 +598,51 @@ webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK"
 
 Alerts are posted to Slack (or custom endpoint) when packages are detected.
 
+### Sidecar API (`clu-api`)
+
+The sidecar is a separate binary that serves a REST API for querying findings and exporting reports.
+
+**Starting the sidecar:**
+
+```bash
+# Standalone
+clu-api
+
+# With Docker
+docker-compose up -d clu-api
+```
+
+**Endpoints** (all require `Authorization: Bearer <token>` when `[sidecar] token` is configured):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/findings` | Register finding (idempotent on ecosystem+name+version+sha256) |
+| `GET` | `/findings` | List/query findings (filter by ecosystem, status, severity, min_score, since) |
+| `GET` | `/findings/{id}` | Single finding detail |
+| `PATCH` | `/findings/{id}` | Update triage status, classification, analyst notes |
+| `GET` | `/findings/{id}/report` | OpenSourceMalware-shaped JSON export (includes linked scan evidence) |
+| `GET` | `/healthz` | Liveness probe (unauthenticated) |
+
+**Example requests:**
+
+```bash
+# List all confirmed-malicious findings
+curl -H "Authorization: Bearer my-secret" \
+  "http://127.0.0.1:8080/findings?status=confirmed_malicious"
+
+# Triage a finding
+curl -X PATCH -H "Authorization: Bearer my-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"confirmed_malicious","classification":"trojan","analyst_notes":"credential harvester"}' \
+  "http://127.0.0.1:8080/findings/42"
+
+# Export OSM report
+curl -H "Authorization: Bearer my-secret" \
+  "http://127.0.0.1:8080/findings/42/report"
+```
+
+**Finding statuses:** `new` → `triaging` → `confirmed_malicious` / `benign` / `duplicate` → `reported`
+
 ### Log Aggregation (ELK, Splunk, CloudWatch)
 
 Results are also written to stdout/stderr and can be forwarded via Docker log drivers:
@@ -578,8 +678,8 @@ make all
 # Build optimized release binary
 make release
 
-# Run unit tests (17 tests)
-make test
+# Run unit tests
+cargo test --lib
 
 # Run tests with output
 make test-verbose
@@ -628,4 +728,4 @@ MIT
 
 ---
 
-*Last Updated: 2026-01-07*
+*Last Updated: 2026-06-13*
