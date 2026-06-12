@@ -15,6 +15,40 @@ pub struct Config {
     pub pipeline: PipelineConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub extraction: ExtractionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExtractionConfig {
+    #[serde(default = "default_max_total_bytes")]
+    pub max_total_bytes: usize,
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: usize,
+    #[serde(default = "default_max_entries")]
+    pub max_entries: usize,
+}
+
+fn default_max_total_bytes() -> usize {
+    67_108_864 // 64 MiB
+}
+
+fn default_max_file_bytes() -> usize {
+    2_097_152 // 2 MiB
+}
+
+fn default_max_entries() -> usize {
+    5000
+}
+
+impl Default for ExtractionConfig {
+    fn default() -> Self {
+        ExtractionConfig {
+            max_total_bytes: default_max_total_bytes(),
+            max_file_bytes: default_max_file_bytes(),
+            max_entries: default_max_entries(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -596,77 +596,61 @@ async fn run_llm_stage(
             }
         };
 
-        // Extract source code for analysis
-        match analysis::package::extract_source_for_analysis(package_contents, 10, 5000) {
-            Ok(source_code) => {
-                // Check for prompt injection first (sentinel)
-                match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await
+        // Extract source code for analysis (in-memory, never writes to disk)
+        let bundle = analysis::package::build_source_bundle(package_contents, 15000);
+        let source_code = analysis::package::format_source_bundle(&bundle);
+
+        // Check for prompt injection first (sentinel)
+        match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await {
+            Ok(injection_result) => {
+                if injection_result.injection_detected {
+                    eprintln!(
+                        "{} Prompt injection detected in {}",
+                        "[!]".red(),
+                        package_name.yellow()
+                    );
+                    return None;
+                }
+
+                // Aggregate findings for LLM assessment
+                let heuristic_findings: Vec<String> = heuristic_matches
+                    .iter()
+                    .map(|h| format!("{}: {}", h.rule_name, h.description))
+                    .collect();
+
+                let typosquat_findings: Vec<String> = typosquat_matches
+                    .iter()
+                    .map(|t| t.evidence.clone())
+                    .collect();
+
+                let guarddog_findings: Vec<String> = guarddog_result
+                    .as_ref()
+                    .map(|g| {
+                        g.findings
+                            .iter()
+                            .map(|f| format!("{} [{}]: {}", f.rule_name, f.severity, f.description))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Safe to proceed with analysis
+                match analysis::llm::analyze_package_code(
+                    package_name,
+                    &source_code,
+                    &heuristic_findings,
+                    &typosquat_findings,
+                    &guarddog_findings,
+                    cfg,
+                )
+                .await
                 {
-                    Ok(injection_result) => {
-                        if injection_result.injection_detected {
-                            eprintln!(
-                                "{} Prompt injection detected in {}",
-                                "[!]".red(),
-                                package_name.yellow()
-                            );
-                            return None;
-                        }
-
-                        // Aggregate findings for LLM assessment
-                        let heuristic_findings: Vec<String> = heuristic_matches
-                            .iter()
-                            .map(|h| format!("{}: {}", h.rule_name, h.description))
-                            .collect();
-
-                        let typosquat_findings: Vec<String> = typosquat_matches
-                            .iter()
-                            .map(|t| t.evidence.clone())
-                            .collect();
-
-                        let guarddog_findings: Vec<String> = guarddog_result
-                            .as_ref()
-                            .map(|g| {
-                                g.findings
-                                    .iter()
-                                    .map(|f| {
-                                        format!(
-                                            "{} [{}]: {}",
-                                            f.rule_name, f.severity, f.description
-                                        )
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        // Safe to proceed with analysis
-                        match analysis::llm::analyze_package_code(
-                            package_name,
-                            &source_code,
-                            &heuristic_findings,
-                            &typosquat_findings,
-                            &guarddog_findings,
-                            cfg,
-                        )
-                        .await
-                        {
-                            Ok(result) => {
-                                log::debug!("Stage 4: LLM analysis completed for {}", package_name);
-                                Some(result)
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "{} Stage 4: LLM analysis failed for {}: {}",
-                                    "[!]".yellow(),
-                                    package_name.yellow(),
-                                    e
-                                );
-                                None
-                            }
-                        }
+                    Ok(result) => {
+                        log::debug!("Stage 4: LLM analysis completed for {}", package_name);
+                        Some(result)
                     }
                     Err(e) => {
                         eprintln!(
-                            "{} Stage 4: Injection detection failed for {}: {}",
+                            "{} Stage 4: LLM analysis failed for {}: {}",
                             "[!]".yellow(),
                             package_name.yellow(),
                             e
@@ -677,8 +661,9 @@ async fn run_llm_stage(
             }
             Err(e) => {
                 eprintln!(
-                    "{} Stage 4: Failed to extract source code: {}",
+                    "{} Stage 4: Injection detection failed for {}: {}",
                     "[!]".yellow(),
+                    package_name.yellow(),
                     e
                 );
                 None

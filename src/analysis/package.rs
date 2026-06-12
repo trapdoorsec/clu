@@ -1,84 +1,534 @@
 //! Package download and extraction utilities
-//! Handles downloading Python packages from PyPI and extracting source code
+//! Handles downloading packages from registries and extracting source code
+//! **entirely in-memory** — no untrusted archive is ever written to disk.
 
-use std::error::Error;
-use std::fs;
-use std::path::PathBuf;
-use tempfile::TempDir;
-use walkdir::WalkDir;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
-/// Downloaded and extracted package contents
-pub struct PackageContents {
-    /// Temporary directory holding extracted package (kept alive while struct exists)
-    #[allow(dead_code)]
-    pub source_dir: TempDir,
-    pub python_files: Vec<PathBuf>,
+use crate::config::ExtractionConfig;
+
+// ── Ecosystem ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ecosystem {
+    PyPI,
+    Npm,
 }
 
-/// Try to find package in pip cache first, to avoid re-downloading
-fn try_find_in_pip_cache(package_name: &str, cache_dir: &str) -> Option<Vec<u8>> {
-    log::debug!("Checking pip cache at: {}", cache_dir);
+// ── File classification roles ────────────────────────────────────────────
 
-    // Pip typically caches packages in http-v2/ or http/ subdirectories
-    let cache_paths = vec![
-        format!("{}/http-v2", cache_dir),
-        format!("{}/http", cache_dir),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileRole {
+    EntryScript = 0,
+    Config = 1,
+    Script = 2,
+    Source = 3,
+    Other = 4,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub relative_path: PathBuf,
+    pub contents: String,
+    pub role: FileRole,
+}
+
+// ── Package contents (entirely in-memory, no TempDir) ───────────────────
+
+pub struct PackageContents {
+    pub files: Vec<FileEntry>,
+    pub ecosystem: Ecosystem,
+}
+
+// ── Source bundle for LLM / heuristics consumption ──────────────────────
+
+#[derive(Debug, Clone)]
+pub struct BundleEntry {
+    pub path: PathBuf,
+    pub role_tag: String,
+    pub contents: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceBundle {
+    pub entries: Vec<BundleEntry>,
+    pub total_bytes: usize,
+    pub truncated: bool,
+}
+
+// ── Extraction error ────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub enum ExtractionError {
+    EntryLimitExceeded {
+        limit: usize,
+        found: usize,
+    },
+    TotalSizeExceeded {
+        limit: usize,
+        actual: usize,
+    },
+    FileTooLarge {
+        path: PathBuf,
+        limit: usize,
+        actual: usize,
+    },
+    Io(String),
+    InvalidArchive(String),
+}
+
+impl std::fmt::Display for ExtractionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExtractionError::EntryLimitExceeded { limit, found } => {
+                write!(f, "entry count exceeded: found {} (limit {})", found, limit)
+            }
+            ExtractionError::TotalSizeExceeded { limit, actual } => {
+                write!(f, "total size exceeded: {} bytes (limit {})", actual, limit)
+            }
+            ExtractionError::FileTooLarge {
+                path,
+                limit,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "file {:?} too large: {} bytes (limit {})",
+                    path, actual, limit
+                )
+            }
+            ExtractionError::Io(msg) => write!(f, "I/O error: {}", msg),
+            ExtractionError::InvalidArchive(msg) => write!(f, "invalid archive: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ExtractionError {}
+
+// ── In-memory tar.gz extraction ──────────────────────────────────────────
+
+fn is_suspicious_region(content: &str) -> bool {
+    let indicators = [
+        "eval(",
+        "exec(",
+        "Function(",
+        "child_process",
+        "subprocess",
+        "os.system",
+        "os.popen",
+        "base64.b64decode",
+        "base64.b64encode",
+        "binascii",
+        "urllib.request",
+        "requests.get",
+        "requests.post",
+        "fetch(",
+        "axios",
     ];
+    let lower = content.to_lowercase();
+    indicators.iter().any(|ind| lower.contains(ind))
+}
 
-    for cache_path in cache_paths {
-        if let Ok(entries) = fs::read_dir(&cache_path) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata()
-                    && metadata.is_dir()
-                {
-                    // Check inside each hash directory
-                    if let Ok(files) = fs::read_dir(entry.path()) {
-                        for file in files.flatten() {
-                            let file_name = file.file_name();
-                            let name_str = file_name.to_string_lossy();
-
-                            // Look for files matching the package name
-                            if name_str.contains(package_name)
-                                && (name_str.ends_with(".tar.gz") || name_str.ends_with(".whl"))
-                            {
-                                log::debug!("Found package in cache: {}", name_str);
-                                if let Ok(data) = fs::read(file.path()) {
-                                    return Some(data);
-                                }
-                            }
-                        }
-                    }
-                }
+fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
+    let p = Path::new(path);
+    let mut sanitized = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::Normal(c) => sanitized.push(c),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                log::warn!("skipping path component in archive entry: {:?}", comp);
+                return None;
             }
         }
     }
-
-    None
+    if sanitized.as_os_str().is_empty() {
+        return None;
+    }
+    Some(sanitized)
 }
 
-/// Download package from PyPI and extract
-pub async fn download_and_extract_package(
-    package_name: &str,
-    package_version: Option<&str>,
-) -> Result<PackageContents, Box<dyn Error>> {
-    // Get cache directory from environment or use default
-    let cache_dir = std::env::var("PIP_CACHE_DIR").unwrap_or_else(|_| "/tmp/pip-cache".to_string());
+pub fn extract_tar_gz_in_memory(
+    data: &[u8],
+    config: &ExtractionConfig,
+    ecosystem: Ecosystem,
+) -> Result<PackageContents, ExtractionError> {
+    let gz = flate2::read::GzDecoder::new(data);
+    let mut archive = tar::Archive::new(gz);
 
-    // First try to find package in shared pip cache (e.g., from GuardDog)
-    if let Some(package_data) = try_find_in_pip_cache(package_name, &cache_dir) {
-        log::info!("Found package in cache, extracting...");
-        let temp_dir = TempDir::new()?;
-        let tar = flate2::read::GzDecoder::new(&package_data[..]);
-        let mut archive = tar::Archive::new(tar);
-        archive.unpack(temp_dir.path())?;
-        let python_files = find_python_files(temp_dir.path())?;
-        return Ok(PackageContents {
-            source_dir: temp_dir,
-            python_files,
+    let mut files: Vec<FileEntry> = Vec::new();
+    let mut total_bytes: usize = 0;
+
+    let entries = archive
+        .entries()
+        .map_err(|e| ExtractionError::InvalidArchive(e.to_string()))?;
+
+    for entry_result in entries {
+        let mut entry = entry_result.map_err(|e| ExtractionError::Io(e.to_string()))?;
+
+        let header = entry.header();
+        let entry_type = header.entry_type();
+
+        if !entry_type.is_file() {
+            log::debug!(
+                "skipping non-regular tar entry: {:?} (type={:?})",
+                entry.path().ok().map(|p| p.display().to_string()),
+                entry_type
+            );
+            continue;
+        }
+
+        if files.len() >= config.max_entries {
+            log::warn!(
+                "entry limit reached: {} (limit {}),
+                 skipping remaining entries",
+                files.len(),
+                config.max_entries
+            );
+            break;
+        }
+
+        let raw_path = entry
+            .path()
+            .map_err(|e| ExtractionError::Io(e.to_string()))?;
+        let relative_path = match sanitize_relative_path(&raw_path.to_string_lossy()) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).map_err(|e| {
+            ExtractionError::Io(format!(
+                "failed to read tar entry {:?}: {}",
+                relative_path, e
+            ))
+        })?;
+
+        if buf.len() > config.max_file_bytes {
+            log::warn!(
+                "skipping oversized tar entry {:?}: {} bytes (limit {})",
+                relative_path,
+                buf.len(),
+                config.max_file_bytes
+            );
+            continue;
+        }
+
+        if total_bytes + buf.len() > config.max_total_bytes {
+            log::warn!(
+                "total size limit reached: {} + {} > {}, stopping extraction",
+                total_bytes,
+                buf.len(),
+                config.max_total_bytes
+            );
+            break;
+        }
+
+        total_bytes += buf.len();
+        let contents = String::from_utf8_lossy(&buf).into_owned();
+        let role = classify_file(&relative_path, ecosystem);
+
+        files.push(FileEntry {
+            relative_path,
+            contents,
+            role,
         });
     }
 
-    // Cache miss - fetch download URL from PyPI JSON API
+    Ok(PackageContents { files, ecosystem })
+}
+
+// ── In-memory ZIP extraction (wheels / .whl) ────────────────────────────
+
+pub fn extract_zip_in_memory(
+    data: &[u8],
+    config: &ExtractionConfig,
+    ecosystem: Ecosystem,
+) -> Result<PackageContents, ExtractionError> {
+    let cursor = std::io::Cursor::new(data);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| ExtractionError::InvalidArchive(e.to_string()))?;
+
+    let mut files: Vec<FileEntry> = Vec::new();
+    let mut total_bytes: usize = 0;
+
+    for i in 0..archive.len() {
+        if files.len() >= config.max_entries {
+            log::warn!(
+                "entry limit reached: {} (limit {}), skipping remaining",
+                files.len(),
+                config.max_entries
+            );
+            break;
+        }
+
+        let mut zip_file = archive
+            .by_index(i)
+            .map_err(|e| ExtractionError::Io(format!("failed to open zip entry {}: {}", i, e)))?;
+
+        if zip_file.is_dir() {
+            continue;
+        }
+
+        let raw_path = zip_file.name().to_string();
+        let relative_path = match sanitize_relative_path(&raw_path) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let mut buf = Vec::new();
+        let read_limit = config.max_file_bytes + 1;
+        let mut limited_reader = std::io::Read::take(&mut zip_file, read_limit as u64);
+        limited_reader.read_to_end(&mut buf).map_err(|e| {
+            ExtractionError::Io(format!(
+                "failed to read zip entry {:?}: {}",
+                relative_path, e
+            ))
+        })?;
+
+        if buf.len() > config.max_file_bytes {
+            log::warn!(
+                "skipping oversized zip entry {:?}: {} bytes (limit {})",
+                relative_path,
+                buf.len(),
+                config.max_file_bytes
+            );
+            continue;
+        }
+
+        if total_bytes + buf.len() > config.max_total_bytes {
+            log::warn!(
+                "total size limit reached: {} + {} > {}, stopping extraction",
+                total_bytes,
+                buf.len(),
+                config.max_total_bytes
+            );
+            break;
+        }
+
+        total_bytes += buf.len();
+        let contents = String::from_utf8_lossy(&buf).into_owned();
+        let role = classify_file(&relative_path, ecosystem);
+
+        files.push(FileEntry {
+            relative_path,
+            contents,
+            role,
+        });
+    }
+
+    Ok(PackageContents { files, ecosystem })
+}
+
+// ── Ecosystem-aware file classification ──────────────────────────────────
+
+pub fn classify_file(path: &Path, ecosystem: Ecosystem) -> FileRole {
+    let fname = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let fname_lower = fname.to_lowercase();
+
+    match ecosystem {
+        Ecosystem::PyPI => classify_pypi_file(path, &fname, &fname_lower),
+        Ecosystem::Npm => classify_npm_file(path, &fname, &fname_lower),
+    }
+}
+
+fn classify_pypi_file(path: &Path, fname: &str, fname_lower: &str) -> FileRole {
+    match fname {
+        "setup.py" | "__main__.py" => return FileRole::EntryScript,
+        _ => {}
+    }
+    if fname_lower == "pyproject.toml" {
+        return FileRole::EntryScript;
+    }
+    if fname_lower == "setup.cfg" || fname_lower == "manifest.in" || fname_lower == "pkg-info" {
+        return FileRole::Config;
+    }
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+    {
+        return FileRole::Source;
+    }
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("sh"))
+    {
+        return FileRole::Script;
+    }
+    if fname_lower == "pkg-info" {
+        return FileRole::Config;
+    }
+    FileRole::Other
+}
+
+fn classify_npm_file(path: &Path, fname: &str, _fname_lower: &str) -> FileRole {
+    if fname == "package.json" {
+        return FileRole::EntryScript;
+    }
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "js" | "mjs" | "cjs" => return FileRole::Source,
+        "ts" => return FileRole::Source,
+        _ => {}
+    }
+    FileRole::Other
+}
+
+// ── Source bundle builder (replaces extract_source_for_analysis) ────────
+
+pub fn build_source_bundle(contents: &PackageContents, budget: usize) -> SourceBundle {
+    let mut sorted: Vec<&FileEntry> = contents.files.iter().collect();
+    sorted.sort_by_key(|e| e.role);
+
+    let mut entries: Vec<BundleEntry> = Vec::new();
+    let mut total_bytes: usize = 0;
+    let mut truncated = false;
+
+    let role_tag = |role: FileRole| -> &'static str {
+        match role {
+            FileRole::EntryScript => "entry-script",
+            FileRole::Config => "config",
+            FileRole::Script => "script",
+            FileRole::Source => "source",
+            FileRole::Other => "other",
+        }
+    };
+
+    for entry in sorted {
+        let is_high_priority = matches!(entry.role, FileRole::EntryScript | FileRole::Config);
+        let content_len = entry.contents.len();
+
+        if is_high_priority {
+            entries.push(BundleEntry {
+                path: entry.relative_path.clone(),
+                role_tag: role_tag(entry.role).to_string(),
+                contents: entry.contents.clone(),
+            });
+            total_bytes += content_len;
+        } else {
+            if total_bytes + content_len > budget {
+                if content_len > 0 && total_bytes < budget {
+                    let remaining = budget.saturating_sub(total_bytes);
+                    if remaining > 0 {
+                        let content = if is_suspicious_region(&entry.contents) {
+                            let start = find_suspicious_offset(&entry.contents, remaining);
+                            extract_region(&entry.contents, start, remaining)
+                        } else {
+                            entry.contents.chars().take(remaining).collect()
+                        };
+                        entries.push(BundleEntry {
+                            path: entry.relative_path.clone(),
+                            role_tag: role_tag(entry.role).to_string(),
+                            contents: format!(
+                                "{}... (truncated from {} bytes)",
+                                content, content_len
+                            ),
+                        });
+                        total_bytes = budget;
+                    }
+                }
+                truncated = true;
+                continue;
+            }
+            entries.push(BundleEntry {
+                path: entry.relative_path.clone(),
+                role_tag: role_tag(entry.role).to_string(),
+                contents: entry.contents.clone(),
+            });
+            total_bytes += content_len;
+        }
+    }
+
+    SourceBundle {
+        entries,
+        total_bytes,
+        truncated,
+    }
+}
+
+fn find_suspicious_offset(content: &str, window: usize) -> usize {
+    let indicators = [
+        "eval(",
+        "exec(",
+        "Function(",
+        "base64",
+        "subprocess",
+        "os.system",
+        "os.popen",
+        "child_process",
+        "require('child_process",
+    ];
+    let lower = content.to_lowercase();
+    for ind in &indicators {
+        if let Some(pos) = lower.find(ind) {
+            let char_pos = content[..pos]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let max_start = content.len().saturating_sub(window);
+            return char_pos.min(max_start);
+        }
+    }
+    0
+}
+
+fn extract_region(content: &str, start: usize, max_len: usize) -> String {
+    let mut result = String::new();
+    let mut byte_pos = 0;
+    let mut char_count = 0;
+
+    for ch in content.chars() {
+        if byte_pos >= start {
+            if char_count >= max_len {
+                break;
+            }
+            result.push(ch);
+            char_count += ch.len_utf8();
+        }
+        byte_pos += ch.len_utf8();
+    }
+    result
+}
+
+// ── Format source bundle as a string for LLM prompt ─────────────────────
+
+pub fn format_source_bundle(bundle: &SourceBundle) -> String {
+    let mut out = String::new();
+    for entry in &bundle.entries {
+        out.push_str(&format!(
+            "\n# File: {} [{}]\n{}\n",
+            entry.path.display(),
+            entry.role_tag,
+            entry.contents
+        ));
+    }
+    out
+}
+
+// ── Download and extract (main entry points) ─────────────────────────────
+
+pub async fn download_and_extract_package(
+    package_name: &str,
+    package_version: Option<&str>,
+) -> Result<PackageContents, Box<dyn std::error::Error>> {
+    let config = ExtractionConfig::default();
+    download_and_extract_package_with_config(package_name, package_version, &config).await
+}
+
+pub async fn download_and_extract_package_with_config(
+    package_name: &str,
+    package_version: Option<&str>,
+    config: &ExtractionConfig,
+) -> Result<PackageContents, Box<dyn std::error::Error>> {
     let url = if let Some(version) = package_version {
         log::info!(
             "Fetching download URL for '{}' version {}...",
@@ -89,11 +539,10 @@ pub async fn download_and_extract_package(
             Ok(url) => url,
             Err(e) => {
                 log::warn!("Could not fetch download URL: {}", e);
-                return download_package_fallback(package_name).await;
+                return download_package_fallback_with_config(package_name, config).await;
             }
         }
     } else {
-        // Fetch latest version and its download URL from PyPI
         log::info!("Fetching latest version of '{}' from PyPI...", package_name);
         match fetch_download_url_latest(package_name).await {
             Ok((version, url)) => {
@@ -103,61 +552,21 @@ pub async fn download_and_extract_package(
             Err(e) => {
                 log::warn!("Could not fetch download URL from PyPI: {}", e);
                 log::info!("Trying fallback URL without version...");
-                // Fallback: try to download from PyPI files without knowing exact version
-                return download_package_fallback(package_name).await;
+                return download_package_fallback_with_config(package_name, config).await;
             }
         }
     };
 
     log::info!("Downloading package from: {}", url);
-
-    // Download package
-    let response = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to download package: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to download package - HTTP {}: {}",
-            response.status(),
-            url
-        )
-        .into());
-    }
-
-    let package_data = response.bytes().await?;
-    let temp_dir = TempDir::new()?;
-
-    // Extract based on file type (tar.gz or wheel)
-    if url.ends_with(".tar.gz") {
-        log::debug!("Extracting tar.gz archive");
-        let tar = flate2::read::GzDecoder::new(&package_data[..]);
-        let mut archive = tar::Archive::new(tar);
-        archive.unpack(temp_dir.path())?;
-    } else if url.ends_with(".whl") {
-        log::debug!("Extracting wheel archive");
-        extract_wheel(&package_data, temp_dir.path())?;
-    } else {
-        return Err("Unsupported distribution format (expected .tar.gz or .whl)".into());
-    }
-
-    // Find all Python files
-    let python_files = find_python_files(temp_dir.path())?;
-
-    Ok(PackageContents {
-        source_dir: temp_dir,
-        python_files,
-    })
+    let package_data = download_bytes(&url).await?;
+    extract_archive_in_memory(&package_data, &url, config, Ecosystem::PyPI)
 }
 
-/// Fallback download method using PyPI simple API
-/// This is less reliable but doesn't require knowing the exact version
-async fn download_package_fallback(package_name: &str) -> Result<PackageContents, Box<dyn Error>> {
+async fn download_package_fallback_with_config(
+    package_name: &str,
+    config: &ExtractionConfig,
+) -> Result<PackageContents, Box<dyn std::error::Error>> {
     log::info!("Using fallback: fetching package links from PyPI simple API");
-
-    // Try the simple API to get available downloads
     let simple_url = format!("https://pypi.org/simple/{}/", package_name);
 
     let response = reqwest::Client::new()
@@ -176,14 +585,11 @@ async fn download_package_fallback(package_name: &str) -> Result<PackageContents
     }
 
     let html = response.text().await?;
-
-    // Prefer .tar.gz (source distribution), but fall back to .whl (wheel)
     let distribution_url = html
         .lines()
         .find(|line| line.contains(".tar.gz") && line.contains("href="))
         .and_then(extract_href)
         .or_else(|| {
-            // Fall back to wheel file if no source distribution
             html.lines()
                 .find(|line| line.contains(".whl") && line.contains("href="))
                 .and_then(extract_href)
@@ -191,35 +597,153 @@ async fn download_package_fallback(package_name: &str) -> Result<PackageContents
 
     if let Some(dist_url) = distribution_url {
         log::info!("Found package at: {}", dist_url);
+        let package_data = download_bytes(&dist_url).await?;
+        return extract_archive_in_memory(&package_data, &dist_url, config, Ecosystem::PyPI);
+    }
 
-        let response = reqwest::Client::new().get(&dist_url).send().await?;
+    Err(format!(
+        "Could not find source distribution (.tar.gz) or wheel (.whl) for '{}' on PyPI",
+        package_name
+    )
+    .into())
+}
 
-        if !response.status().is_success() {
-            return Err("Failed to download from fallback URL".to_string().into());
+async fn download_bytes(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download package: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download package - HTTP {}: {}",
+            response.status(),
+            url
+        )
+        .into());
+    }
+
+    let bytes = response.bytes().await?;
+    Ok(bytes.to_vec())
+}
+
+fn extract_archive_in_memory(
+    data: &[u8],
+    url: &str,
+    config: &ExtractionConfig,
+    ecosystem: Ecosystem,
+) -> Result<PackageContents, Box<dyn std::error::Error>> {
+    if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
+        log::debug!("Extracting tar.gz archive in-memory");
+        extract_tar_gz_in_memory(data, config, ecosystem)
+            .map_err(|e| format!("tar.gz extraction failed: {}", e).into())
+    } else if url.ends_with(".whl") || url.ends_with(".zip") {
+        log::debug!("Extracting wheel/zip archive in-memory");
+        extract_zip_in_memory(data, config, ecosystem)
+            .map_err(|e| format!("zip extraction failed: {}", e).into())
+    } else {
+        Err("Unsupported distribution format (expected .tar.gz, .tgz, .whl, or .zip)".into())
+    }
+}
+
+// ── PyPI JSON API helpers ────────────────────────────────────────────────
+
+async fn fetch_download_url(
+    package_name: &str,
+    version: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let url = format!("https://pypi.org/pypi/{}/json", package_name);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch PyPI data for '{}': {}", package_name, e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "PyPI API returned status {} for package '{}' - package may not exist",
+            response.status(),
+            package_name
+        )
+        .into());
+    }
+
+    let json_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse PyPI JSON response: {}", e))?;
+
+    if let Some(releases) = json_data["releases"][version].as_array() {
+        let mut wheel_url: Option<String> = None;
+        for release in releases {
+            if let Some(filename) = release["filename"].as_str() {
+                if filename.ends_with(".tar.gz") {
+                    if let Some(download_url) = release["url"].as_str() {
+                        return Ok(download_url.to_string());
+                    }
+                } else if filename.ends_with(".whl") && wheel_url.is_none() {
+                    wheel_url = release["url"].as_str().map(|s| s.to_string());
+                }
+            }
         }
-
-        let package_data = response.bytes().await?;
-        let temp_dir = TempDir::new()?;
-
-        // Extract based on file type
-        if dist_url.ends_with(".tar.gz") {
-            log::debug!("Extracting tar.gz archive");
-            let tar = flate2::read::GzDecoder::new(&package_data[..]);
-            let mut archive = tar::Archive::new(tar);
-            archive.unpack(temp_dir.path())?;
-        } else if dist_url.ends_with(".whl") {
-            log::debug!("Extracting wheel archive");
-            extract_wheel(&package_data, temp_dir.path())?;
-        } else {
-            return Err("Unsupported distribution format".into());
+        if let Some(url) = wheel_url {
+            return Ok(url);
         }
+    }
 
-        let python_files = find_python_files(temp_dir.path())?;
+    Err(format!(
+        "Could not find source distribution (.tar.gz) or wheel (.whl) for '{}' version '{}' on PyPI",
+        package_name, version
+    )
+    .into())
+}
 
-        return Ok(PackageContents {
-            source_dir: temp_dir,
-            python_files,
-        });
+async fn fetch_download_url_latest(
+    package_name: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let url = format!("https://pypi.org/pypi/{}/json", package_name);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch PyPI data for '{}': {}", package_name, e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "PyPI API returned status {} for package '{}' - package may not exist",
+            response.status(),
+            package_name
+        )
+        .into());
+    }
+
+    let json_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse PyPI JSON response: {}", e))?;
+
+    let version = json_data["info"]["version"]
+        .as_str()
+        .ok_or_else(|| format!("Could not extract version from PyPI for '{}'", package_name))?
+        .to_string();
+
+    if let Some(releases) = json_data["releases"][&version].as_array() {
+        let mut wheel_url: Option<String> = None;
+        for release in releases {
+            if let Some(filename) = release["filename"].as_str() {
+                if filename.ends_with(".tar.gz") {
+                    if let Some(download_url) = release["url"].as_str() {
+                        return Ok((version, download_url.to_string()));
+                    }
+                } else if filename.ends_with(".whl") && wheel_url.is_none() {
+                    wheel_url = release["url"].as_str().map(|s| s.to_string());
+                }
+            }
+        }
+        if let Some(url) = wheel_url {
+            return Ok((version, url));
+        }
     }
 
     Err(format!(
@@ -239,233 +763,177 @@ fn extract_href(line: &str) -> Option<String> {
     None
 }
 
-/// Extract Python files from wheel archive (which is a ZIP file)
-fn extract_wheel(data: &[u8], dest_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    use std::io::Cursor;
-    use std::path::Path;
-    use zip::ZipArchive;
-
-    let cursor = Cursor::new(data);
-    let mut archive = ZipArchive::new(cursor)?;
-
-    // Extract all files to temp directory
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-
-        // Get filename without path traversal attacks
-        let file_name = file.name();
-        let safe_name = Path::new(file_name)
-            .components()
-            .filter(|c| !matches!(c, std::path::Component::ParentDir))
-            .collect::<std::path::PathBuf>();
-
-        let outpath = dest_path.join(&safe_name);
-
-        if file.is_dir() {
-            fs::create_dir_all(&outpath)?;
-        } else {
-            if let Some(parent) = outpath.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut outfile = fs::File::create(&outpath)?;
-            std::io::copy(&mut file, &mut outfile)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Find all .py files in a directory
-fn find_python_files(root: &std::path::Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let mut files = Vec::new();
-
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "py"))
-    {
-        files.push(entry.path().to_path_buf());
-    }
-
-    Ok(files)
-}
-
-/// Extract Python source code for analysis (limited to first N files, max M bytes)
-pub fn extract_source_for_analysis(
-    package: &PackageContents,
-    max_files: usize,
-    max_bytes_per_file: usize,
-) -> Result<String, Box<dyn Error>> {
-    let mut combined_source = String::new();
-    let mut file_count = 0;
-
-    for file_path in package.python_files.iter().take(max_files) {
-        if file_count >= max_files {
-            break;
-        }
-
-        match fs::read_to_string(file_path) {
-            Ok(content) => {
-                // Truncate if too large, respecting UTF-8 character boundaries
-                let truncated = if content.len() > max_bytes_per_file {
-                    // Safely truncate by taking characters until we exceed byte limit
-                    let mut safe_truncated = String::new();
-                    for ch in content.chars() {
-                        if safe_truncated.len() + ch.len_utf8() > max_bytes_per_file {
-                            break;
-                        }
-                        safe_truncated.push(ch);
-                    }
-                    format!(
-                        "{}\n... (truncated from {} bytes)",
-                        safe_truncated,
-                        content.len()
-                    )
-                } else {
-                    content
-                };
-
-                combined_source.push_str(&format!(
-                    "\n# File: {}\n{}\n",
-                    file_path.display(),
-                    truncated
-                ));
-
-                file_count += 1;
-            }
-            Err(e) => {
-                // Log but continue if we can't read a file
-                eprintln!("Warning: Could not read {}: {}", file_path.display(), e);
-            }
-        }
-    }
-
-    Ok(combined_source)
-}
-
-/// Fetch download URL for a specific package version from PyPI JSON API
-async fn fetch_download_url(package_name: &str, version: &str) -> Result<String, Box<dyn Error>> {
-    let url = format!("https://pypi.org/pypi/{}/json", package_name);
-
-    let response = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch PyPI data for '{}': {}", package_name, e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "PyPI API returned status {} for package '{}' - package may not exist",
-            response.status(),
-            package_name
-        )
-        .into());
-    }
-
-    let json_data: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse PyPI JSON response: {}", e))?;
-
-    // Get the releases for the specific version
-    if let Some(releases) = json_data["releases"][version].as_array() {
-        // Prefer source distribution (.tar.gz), but accept wheel (.whl) as fallback
-        let mut wheel_url: Option<String> = None;
-
-        for release in releases {
-            if let Some(filename) = release["filename"].as_str() {
-                if filename.ends_with(".tar.gz") {
-                    if let Some(download_url) = release["url"].as_str() {
-                        return Ok(download_url.to_string());
-                    }
-                } else if filename.ends_with(".whl") && wheel_url.is_none() {
-                    // Keep the first wheel found as fallback
-                    wheel_url = release["url"].as_str().map(|s| s.to_string());
-                }
-            }
-        }
-
-        // If no tar.gz found, use wheel if available
-        if let Some(url) = wheel_url {
-            return Ok(url);
-        }
-    }
-
-    Err(format!(
-        "Could not find source distribution (.tar.gz) or wheel (.whl) for '{}' version '{}' on PyPI",
-        package_name, version
-    )
-    .into())
-}
-
-/// Fetch latest version and its download URL from PyPI JSON API
-async fn fetch_download_url_latest(package_name: &str) -> Result<(String, String), Box<dyn Error>> {
-    let url = format!("https://pypi.org/pypi/{}/json", package_name);
-
-    let response = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch PyPI data for '{}': {}", package_name, e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "PyPI API returned status {} for package '{}' - package may not exist",
-            response.status(),
-            package_name
-        )
-        .into());
-    }
-
-    let json_data: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse PyPI JSON response: {}", e))?;
-
-    // Get the latest version from info
-    let version = json_data["info"]["version"]
-        .as_str()
-        .ok_or_else(|| format!("Could not extract version from PyPI for '{}'", package_name))?
-        .to_string();
-
-    // Get the releases for this version
-    if let Some(releases) = json_data["releases"][&version].as_array() {
-        // Prefer source distribution (.tar.gz), but accept wheel (.whl) as fallback
-        let mut wheel_url: Option<String> = None;
-
-        for release in releases {
-            if let Some(filename) = release["filename"].as_str() {
-                if filename.ends_with(".tar.gz") {
-                    if let Some(download_url) = release["url"].as_str() {
-                        return Ok((version, download_url.to_string()));
-                    }
-                } else if filename.ends_with(".whl") && wheel_url.is_none() {
-                    // Keep the first wheel found as fallback
-                    wheel_url = release["url"].as_str().map(|s| s.to_string());
-                }
-            }
-        }
-
-        // If no tar.gz found, use wheel if available
-        if let Some(url) = wheel_url {
-            return Ok((version, url));
-        }
-    }
-
-    Err(format!(
-        "Could not find source distribution (.tar.gz) or wheel (.whl) for '{}' on PyPI",
-        package_name
-    )
-    .into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_python_file_detection() {
-        // This would require creating temp files
-        // For now, just ensure the module compiles
+    fn test_classify_pypi_entry_script() {
+        assert_eq!(
+            classify_file(Path::new("pkg/setup.py"), Ecosystem::PyPI),
+            FileRole::EntryScript
+        );
+        assert_eq!(
+            classify_file(Path::new("pkg/__main__.py"), Ecosystem::PyPI),
+            FileRole::EntryScript
+        );
+        assert_eq!(
+            classify_file(Path::new("pkg/pyproject.toml"), Ecosystem::PyPI),
+            FileRole::EntryScript
+        );
+    }
+
+    #[test]
+    fn test_classify_pypi_config() {
+        assert_eq!(
+            classify_file(Path::new("pkg/setup.cfg"), Ecosystem::PyPI),
+            FileRole::Config
+        );
+        assert_eq!(
+            classify_file(Path::new("pkg/PKG-INFO"), Ecosystem::PyPI),
+            FileRole::Config
+        );
+    }
+
+    #[test]
+    fn test_classify_pypi_source() {
+        assert_eq!(
+            classify_file(Path::new("pkg/module.py"), Ecosystem::PyPI),
+            FileRole::Source
+        );
+    }
+
+    #[test]
+    fn test_classify_pypi_script() {
+        assert_eq!(
+            classify_file(Path::new("pkg/scripts/build.sh"), Ecosystem::PyPI),
+            FileRole::Script
+        );
+    }
+
+    #[test]
+    fn test_classify_npm_entry() {
+        assert_eq!(
+            classify_file(Path::new("pkg/package.json"), Ecosystem::Npm),
+            FileRole::EntryScript
+        );
+    }
+
+    #[test]
+    fn test_classify_npm_source() {
+        assert_eq!(
+            classify_file(Path::new("pkg/index.js"), Ecosystem::Npm),
+            FileRole::Source
+        );
+        assert_eq!(
+            classify_file(Path::new("pkg/app.ts"), Ecosystem::Npm),
+            FileRole::Source
+        );
+    }
+
+    #[test]
+    fn test_sanitize_relative_path_normal() {
+        let result = sanitize_relative_path("pkg/module.py");
+        assert_eq!(result, Some(PathBuf::from("pkg/module.py")));
+    }
+
+    #[test]
+    fn test_sanitize_relative_path_traversal() {
+        let result = sanitize_relative_path("../../etc/passwd");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_relative_path_absolute() {
+        let result = sanitize_relative_path("/etc/passwd");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_relative_path_mix() {
+        let result = sanitize_relative_path("pkg/../etc/passwd");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_source_bundle_priority_ordering() {
+        let config = ExtractionConfig::default();
+        let contents = PackageContents {
+            files: vec![
+                FileEntry {
+                    relative_path: PathBuf::from("pkg/utils.py"),
+                    contents: "import os".to_string(),
+                    role: FileRole::Source,
+                },
+                FileEntry {
+                    relative_path: PathBuf::from("pkg/setup.py"),
+                    contents: "from setuptools import setup".to_string(),
+                    role: FileRole::EntryScript,
+                },
+                FileEntry {
+                    relative_path: PathBuf::from("pkg/README"),
+                    contents: "readme".to_string(),
+                    role: FileRole::Other,
+                },
+            ],
+            ecosystem: Ecosystem::PyPI,
+        };
+
+        let bundle = build_source_bundle(&contents, config.max_total_bytes);
+        assert_eq!(bundle.entries.len(), 3);
+        assert_eq!(bundle.entries[0].role_tag, "entry-script");
+        assert_eq!(bundle.entries[1].role_tag, "source");
+        assert_eq!(bundle.entries[2].role_tag, "other");
+    }
+
+    #[test]
+    fn test_build_source_bundle_no_truncation_of_entry_scripts() {
+        let config = ExtractionConfig {
+            max_total_bytes: 50,
+            max_file_bytes: 2_097_152,
+            max_entries: 5000,
+        };
+        let big_content = "x".repeat(100);
+        let contents = PackageContents {
+            files: vec![FileEntry {
+                relative_path: PathBuf::from("setup.py"),
+                contents: big_content.clone(),
+                role: FileRole::EntryScript,
+            }],
+            ecosystem: Ecosystem::PyPI,
+        };
+
+        let bundle = build_source_bundle(&contents, 50);
+        assert_eq!(bundle.entries[0].contents.len(), 100);
+        assert!(!bundle.entries[0].contents.contains("truncated"));
+    }
+
+    #[test]
+    fn test_build_source_bundle_truncates_source_when_over_budget() {
+        let config = ExtractionConfig {
+            max_total_bytes: 30,
+            max_file_bytes: 2_097_152,
+            max_entries: 5000,
+        };
+        let contents = PackageContents {
+            files: vec![FileEntry {
+                relative_path: PathBuf::from("module.py"),
+                contents: "a".repeat(100),
+                role: FileRole::Source,
+            }],
+            ecosystem: Ecosystem::PyPI,
+        };
+
+        let bundle = build_source_bundle(&contents, 30);
+        assert!(bundle.truncated);
+        assert!(bundle.entries[0].contents.contains("truncated"));
+    }
+
+    #[test]
+    fn test_extraction_config_defaults() {
+        let config = ExtractionConfig::default();
+        assert_eq!(config.max_total_bytes, 67_108_864);
+        assert_eq!(config.max_file_bytes, 2_097_152);
+        assert_eq!(config.max_entries, 5000);
     }
 }
