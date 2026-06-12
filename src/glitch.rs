@@ -1,9 +1,9 @@
+use owo_colors::OwoColorize;
 use rand::Rng;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::thread;
 use std::time::Duration;
-use owo_colors::OwoColorize;
 
 /// Mapping of regular characters to l33t speak alternatives
 fn leet_map() -> HashMap<char, Vec<char>> {
@@ -58,10 +58,11 @@ fn glitch_char(c: char, intensity: f32, map: &HashMap<char, Vec<char>>) -> char 
 
     // Try to find a l33t replacement
     if let Some(replacements) = map.get(&c)
-        && !replacements.is_empty() {
-            let idx = rng.gen_range(0..replacements.len());
-            return replacements[idx];
-        }
+        && !replacements.is_empty()
+    {
+        let idx = rng.gen_range(0..replacements.len());
+        return replacements[idx];
+    }
 
     c
 }
@@ -135,7 +136,8 @@ pub fn matrix_glitch(text: &str, iterations: usize, use_color: bool) {
         // Decrease glitch probability as we progress
         let base_intensity = 1.0 - (i as f32 / iterations as f32);
 
-        let glitched: String = text.chars()
+        let glitched: String = text
+            .chars()
             .map(|c| {
                 // Each character has independent glitch chance
                 let char_intensity = base_intensity * rng.r#gen::<f32>();

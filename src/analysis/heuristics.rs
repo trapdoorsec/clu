@@ -6,7 +6,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HeuristicMatch {
     pub rule_name: String,
     pub risk_score: u8,
@@ -208,13 +208,14 @@ pub fn validate_heuristics_file(path: &str) -> Result<(), Vec<String>> {
                 if !rule_table.contains_key("check") {
                     errors.push(format!("Metadata rule '{}' missing 'check'", rule_name));
                 } else if let Some(check) = rule_table.get("check").and_then(|c| c.as_str())
-                    && !valid_checks.contains(&check) {
-                        let safe_check = sanitize_error_string(check);
-                        errors.push(format!(
-                            "Metadata rule '{}' has invalid check [{}], must be one of: {:?}",
-                            rule_name, safe_check, valid_checks
-                        ));
-                    }
+                    && !valid_checks.contains(&check)
+                {
+                    let safe_check = sanitize_error_string(check);
+                    errors.push(format!(
+                        "Metadata rule '{}' has invalid check [{}], must be one of: {:?}",
+                        rule_name, safe_check, valid_checks
+                    ));
+                }
             }
             "" => {
                 errors.push(format!("Rule '{}' has empty type", rule_name));
@@ -230,13 +231,14 @@ pub fn validate_heuristics_file(path: &str) -> Result<(), Vec<String>> {
 
         // Validate field name if present
         if let Some(field) = rule_table.get("field").and_then(|f| f.as_str())
-            && !valid_fields.contains(&field) {
-                let safe_field = sanitize_error_string(field);
-                errors.push(format!(
-                    "Rule '{}' has invalid field [{}], must be one of: {:?}",
-                    rule_name, safe_field, valid_fields
-                ));
-            }
+            && !valid_fields.contains(&field)
+        {
+            let safe_field = sanitize_error_string(field);
+            errors.push(format!(
+                "Rule '{}' has invalid field [{}], must be one of: {:?}",
+                rule_name, safe_field, valid_fields
+            ));
+        }
     }
 
     if errors.is_empty() {

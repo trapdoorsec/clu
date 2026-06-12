@@ -1,7 +1,7 @@
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use crate::glitch::matrix_glitch;
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use std::fs;
 use std::path::Path;
-use crate::glitch::matrix_glitch;
 
 struct ConfigValues {
     feed_endpoint: String,
@@ -25,11 +25,18 @@ struct ConfigValues {
 
 pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    matrix_glitch(".:* Configuring CLU with acceptable parameters..\n", 10,use_color);
+    matrix_glitch(
+        ".:* Configuring CLU with acceptable parameters..\n",
+        10,
+        use_color,
+    );
     // Check if config already exists
     if Path::new(config_path).exists() {
         let overwrite = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("Configuration file '{}' already exists. Overwrite?", config_path))
+            .with_prompt(format!(
+                "Configuration file '{}' already exists. Overwrite?",
+                config_path
+            ))
             .default(false)
             .interact()?;
 
@@ -50,7 +57,10 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
 
     let popular_packages_endpoint: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Popular packages endpoint (for typosquatting detection)")
-        .default("https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.min.json".to_string())
+        .default(
+            "https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.min.json"
+                .to_string(),
+        )
         .interact_text()?;
 
     let poll_interval_options = ["10s", "30s", "1m", "5m", "15m", "30m", "1h"];
@@ -76,9 +86,18 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         .interact_text()?;
 
     let model_options = [
-        ("qwen2.5-coder:7b - Excellent for code analysis (Recommended)", "qwen2.5-coder:7b"),
-        ("llama3.2 - Latest Llama model, strong reasoning", "llama3.2"),
-        ("deepseek-coder-v2 - Specialized for code understanding", "deepseek-coder-v2"),
+        (
+            "qwen2.5-coder:7b - Excellent for code analysis (Recommended)",
+            "qwen2.5-coder:7b",
+        ),
+        (
+            "llama3.2 - Latest Llama model, strong reasoning",
+            "llama3.2",
+        ),
+        (
+            "deepseek-coder-v2 - Specialized for code understanding",
+            "deepseek-coder-v2",
+        ),
         ("codellama - Meta's code-specialized model", "codellama"),
         ("mistral-nemo - Balanced performance", "mistral-nemo"),
         ("Custom model name...", "custom"),
@@ -87,7 +106,12 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
     let model_selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Select LLM model for code analysis")
         .default(0) // qwen2.5-coder:7b
-        .items(&model_options.iter().map(|(label, _)| label).collect::<Vec<_>>())
+        .items(
+            &model_options
+                .iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>(),
+        )
         .interact()?;
 
     let llm_model = if model_options[model_selection].1 == "custom" {
@@ -130,7 +154,12 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
     let typosquat_selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Typosquatting detection sensitivity")
         .default(1) // Moderate
-        .items(&typosquat_options.iter().map(|(label, _)| label).collect::<Vec<_>>())
+        .items(
+            &typosquat_options
+                .iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>(),
+        )
         .interact()?;
     let typosquat_threshold = typosquat_options[typosquat_selection].1;
 
@@ -164,7 +193,7 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         .interact()?;
 
     // === Output Configuration ===
-    matrix_glitch("\n.:* Output Configuration\n",10, use_color);
+    matrix_glitch("\n.:* Output Configuration\n", 10, use_color);
     println!("Configure how CLU outputs detection results.\n");
 
     let enable_webhook = Confirm::with_theme(&ColorfulTheme::default())
@@ -221,11 +250,18 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
     fs::write(config_path, config_content)?;
 
     println!("\n.oO0( Configuration saved to '{}'", config_path);
-    matrix_glitch(r#"
+    matrix_glitch(
+        r#"
     .:* Setup complete! You can now run:
        clu watch    - Start monitoring the PyPI feed
-       clu scan <package>  - Scan a specific package"#, 10, use_color);
-    println!("\nYou can edit '{}' manually to fine-tune your configuration.\n", config_path);
+       clu scan <package>  - Scan a specific package"#,
+        10,
+        use_color,
+    );
+    println!(
+        "\nYou can edit '{}' manually to fine-tune your configuration.\n",
+        config_path
+    );
 
     Ok(())
 }
@@ -323,10 +359,16 @@ llm = {}
 }
 
 /// Check if a model exists on Ollama server via HTTP API
-async fn check_and_download_model(endpoint: &str, model_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn check_and_download_model(
+    endpoint: &str,
+    model_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     use crate::analysis;
 
-    println!("\n.:* Checking if model '{}' is available at {}...", model_name, endpoint);
+    println!(
+        "\n.:* Checking if model '{}' is available at {}...",
+        model_name, endpoint
+    );
 
     // Normalize endpoint URL
     let endpoint_url = if endpoint.contains("://") {
@@ -408,7 +450,8 @@ mod tests {
 
         assert!(toml.contains("# webhook ="));
         // Should have commented webhook, not active webhook line
-        let has_active_webhook = toml.lines()
+        let has_active_webhook = toml
+            .lines()
             .any(|line| line.starts_with("webhook = \"") && !line.starts_with("# webhook"));
         assert!(!has_active_webhook);
         assert!(toml.contains("check_updates = true"));

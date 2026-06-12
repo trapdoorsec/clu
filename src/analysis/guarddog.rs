@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 /// Result from GuardDog analysis
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GuardDogResult {
     pub is_malicious: bool,
     pub risk_score: u8,
@@ -15,7 +15,7 @@ pub struct GuardDogResult {
 }
 
 /// Individual finding from GuardDog
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GuardDogFinding {
     pub rule_name: String,
     pub severity: String,
@@ -119,7 +119,8 @@ fn parse_guarddog_output(stdout: &[u8]) -> Result<GuardDogResult, Box<dyn Error>
             // If JSON parsing fails, log both error and actual output for debugging
             log::error!("GuardDog: Failed to parse JSON output");
             log::error!("GuardDog: Parse error: {}", e);
-            log::error!("GuardDog: Raw output (first 2000 chars): {}",
+            log::error!(
+                "GuardDog: Raw output (first 2000 chars): {}",
                 if output_str.len() > 2000 {
                     format!("{}...[truncated]", &output_str[..2000])
                 } else {
@@ -152,7 +153,7 @@ fn parse_guarddog_output(stdout: &[u8]) -> Result<GuardDogResult, Box<dyn Error>
                                 description: description.clone(),
                             })
                         }
-                        _ => None,  // Null, empty objects {}, or other values = no issue
+                        _ => None, // Null, empty objects {}, or other values = no issue
                     }
                 })
                 .collect()
@@ -200,14 +201,25 @@ fn categorize_rule_severity(rule_name: &str) -> String {
         "code-execution" | "exec-base64" | "download-executable" => "critical".to_string(),
 
         // High severity rules
-        "exfiltrate-sensitive-data" | "silent-process-execution" | "dll-hijacking"
-        | "clipboard-access" | "cmd-overwrite" | "steganography" | "api-obfuscation"
-        | "shady-links" | "bundled_binary" | "deceptive_author"
+        "exfiltrate-sensitive-data"
+        | "silent-process-execution"
+        | "dll-hijacking"
+        | "clipboard-access"
+        | "cmd-overwrite"
+        | "steganography"
+        | "api-obfuscation"
+        | "shady-links"
+        | "bundled_binary"
+        | "deceptive_author"
         | "potentially_compromised_email_domain" => "high".to_string(),
 
         // Medium severity rules
-        "obfuscation" | "unicode" | "single_python_file" | "release_zero"
-        | "empty_information" | "repository_integrity_mismatch" => "medium".to_string(),
+        "obfuscation"
+        | "unicode"
+        | "single_python_file"
+        | "release_zero"
+        | "empty_information"
+        | "repository_integrity_mismatch" => "medium".to_string(),
 
         // Low severity rules
         "unclaimed_maintainer_email_domain" | "typosquatting" => "low".to_string(),
@@ -358,10 +370,30 @@ mod tests {
         // Should find: single_python_file (medium), bundled_binary (high)
         // null and {} values are ignored (no issue)
         assert_eq!(result.findings.len(), 2);
-        assert!(result.findings.iter().any(|f| f.rule_name == "bundled_binary"));
-        assert!(result.findings.iter().any(|f| f.rule_name == "single_python_file"));
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.rule_name == "bundled_binary")
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.rule_name == "single_python_file")
+        );
         // Verify that rules with null or {} are NOT included
-        assert!(!result.findings.iter().any(|f| f.rule_name == "code-execution"));
-        assert!(!result.findings.iter().any(|f| f.rule_name == "silent-process-execution"));
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|f| f.rule_name == "code-execution")
+        );
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|f| f.rule_name == "silent-process-execution")
+        );
     }
 }

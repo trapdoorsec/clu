@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 fn test_redos_protection() {
     // Known ReDoS patterns - these should timeout or be rejected
     let malicious_patterns = vec![
-        r"(a+)+b",                           // Classic ReDoS
-        r"(a*)*b",                           // Nested quantifiers
-        r"(a|a)*b",                          // Alternation with repetition
-        r"(a|ab)*c",                         // More complex alternation
-        r"([a-zA-Z]+)*[0-9]",               // Common pattern with ReDoS potential
+        r"(a+)+b",            // Classic ReDoS
+        r"(a*)*b",            // Nested quantifiers
+        r"(a|a)*b",           // Alternation with repetition
+        r"(a|ab)*c",          // More complex alternation
+        r"([a-zA-Z]+)*[0-9]", // Common pattern with ReDoS potential
     ];
 
-    let test_input = "a".repeat(30);  // Long input to trigger backtracking
+    let test_input = "a".repeat(30); // Long input to trigger backtracking
 
     for pattern in malicious_patterns {
         println!("Testing pattern: {}", pattern);
@@ -27,8 +27,12 @@ fn test_redos_protection() {
             let elapsed = start.elapsed();
 
             // Regex should complete in reasonable time (< 100ms)
-            assert!(elapsed < Duration::from_millis(100),
-                    "Pattern '{}' took {:?} - potential ReDoS!", pattern, elapsed);
+            assert!(
+                elapsed < Duration::from_millis(100),
+                "Pattern '{}' took {:?} - potential ReDoS!",
+                pattern,
+                elapsed
+            );
         }
     }
 }
@@ -39,13 +43,10 @@ fn test_malformed_toml_handling() {
     let malformed_inputs = vec![
         // Missing closing bracket
         "[[rules]\nname = \"test\"",
-
         // Invalid TOML syntax
         "rules = {{{",
-
         // Unterminated string
         "[[rules]]\nname = \"unterminated",
-
         // Invalid escape sequence
         "[[rules]]\npattern = \"\\z\"",
     ];
@@ -98,12 +99,18 @@ fn test_large_toml_handling() {
     let elapsed = start.elapsed();
 
     // Should parse but set a reasonable timeout (< 5 seconds)
-    assert!(elapsed < Duration::from_secs(5),
-            "Parsing took too long: {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "Parsing took too long: {:?}",
+        elapsed
+    );
 
     if let Ok(parsed) = result {
-        println!("Successfully parsed {} rules in {:?}",
-                 parsed["rules"].as_array().unwrap().len(), elapsed);
+        println!(
+            "Successfully parsed {} rules in {:?}",
+            parsed["rules"].as_array().unwrap().len(),
+            elapsed
+        );
     }
 }
 
@@ -133,30 +140,29 @@ fn test_deeply_nested_toml() {
 /// Test that regex patterns actually compile
 #[test]
 fn test_regex_patterns_compile() {
-    let content = std::fs::read_to_string("heuristics.toml")
-        .expect("Failed to read heuristics.toml");
+    let content =
+        std::fs::read_to_string("heuristics.toml").expect("Failed to read heuristics.toml");
 
-    let parsed: toml::Value = toml::from_str(&content)
-        .expect("Failed to parse TOML");
+    let parsed: toml::Value = toml::from_str(&content).expect("Failed to parse TOML");
 
-    let rules = parsed.get("rules")
-        .unwrap()
-        .as_array()
-        .unwrap();
+    let rules = parsed.get("rules").unwrap().as_array().unwrap();
 
     for rule in rules {
         if rule.get("type").unwrap().as_str().unwrap() == "regex" {
-            let pattern = rule.get("pattern")
+            let pattern = rule
+                .get("pattern")
                 .expect("Regex rule missing pattern")
                 .as_str()
                 .expect("Pattern is not a string");
 
             let result = Regex::new(pattern);
 
-            assert!(result.is_ok(),
-                    "Invalid regex pattern in rule '{}': {}",
-                    rule.get("name").unwrap().as_str().unwrap(),
-                    pattern);
+            assert!(
+                result.is_ok(),
+                "Invalid regex pattern in rule '{}': {}",
+                rule.get("name").unwrap().as_str().unwrap(),
+                pattern
+            );
         }
     }
 }
@@ -167,29 +173,25 @@ fn test_regex_patterns_compile() {
 fn test_no_command_injection_chars() {
     let dangerous_chars = vec![";", "|", "&", "$", "`", "\n", "$(", "${"];
 
-    let content = std::fs::read_to_string("heuristics.toml")
-        .expect("Failed to read heuristics.toml");
+    let content =
+        std::fs::read_to_string("heuristics.toml").expect("Failed to read heuristics.toml");
 
-    let parsed: toml::Value = toml::from_str(&content)
-        .expect("Failed to parse TOML");
+    let parsed: toml::Value = toml::from_str(&content).expect("Failed to parse TOML");
 
     // Check that rule names don't contain shell metacharacters
     // (defense in depth - even though we don't execute them)
-    let rules = parsed.get("rules")
-        .unwrap()
-        .as_array()
-        .unwrap();
+    let rules = parsed.get("rules").unwrap().as_array().unwrap();
 
     for rule in rules {
-        let name = rule.get("name")
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let name = rule.get("name").unwrap().as_str().unwrap();
 
         for dangerous in &dangerous_chars {
-            assert!(!name.contains(dangerous),
-                    "Rule name '{}' contains dangerous character '{}'",
-                    name, dangerous);
+            assert!(
+                !name.contains(dangerous),
+                "Rule name '{}' contains dangerous character '{}'",
+                name,
+                dangerous
+            );
         }
     }
 }

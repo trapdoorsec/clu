@@ -13,6 +13,8 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub pipeline: PipelineConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +137,34 @@ impl Default for PipelineConfig {
             typosquat: true,
             guarddog: false,
             llm: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DatabaseConfig {
+    /// Database connection URL (e.g., "sqlite://data/clu.db")
+    #[serde(default = "default_database_url")]
+    pub url: String,
+
+    /// Enable database persistence (if false, uses in-memory only)
+    #[serde(default = "default_enable_database")]
+    pub enable: bool,
+}
+
+fn default_database_url() -> String {
+    "sqlite://config/data/clu.db".to_string()
+}
+
+fn default_enable_database() -> bool {
+    true
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        DatabaseConfig {
+            url: default_database_url(),
+            enable: default_enable_database(),
         }
     }
 }

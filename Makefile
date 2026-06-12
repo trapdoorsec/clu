@@ -86,4 +86,4 @@ docker-clean-aggressive:
 
 # Run all checks (build, test, lint)
 all: release test check
-	@echo "✅ All checks passed!"
+	@echo " All checks passed!"

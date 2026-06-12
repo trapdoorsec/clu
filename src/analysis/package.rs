@@ -1,9 +1,9 @@
-/// Package download and extraction utilities
-/// Handles downloading Python packages from PyPI and extracting source code
+//! Package download and extraction utilities
+//! Handles downloading Python packages from PyPI and extracting source code
 
 use std::error::Error;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
@@ -28,20 +28,22 @@ fn try_find_in_pip_cache(package_name: &str, cache_dir: &str) -> Option<Vec<u8>>
     for cache_path in cache_paths {
         if let Ok(entries) = fs::read_dir(&cache_path) {
             for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_dir() {
-                        // Check inside each hash directory
-                        if let Ok(files) = fs::read_dir(entry.path()) {
-                            for file in files.flatten() {
-                                let file_name = file.file_name();
-                                let name_str = file_name.to_string_lossy();
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.is_dir()
+                {
+                    // Check inside each hash directory
+                    if let Ok(files) = fs::read_dir(entry.path()) {
+                        for file in files.flatten() {
+                            let file_name = file.file_name();
+                            let name_str = file_name.to_string_lossy();
 
-                                // Look for files matching the package name
-                                if name_str.contains(package_name) && (name_str.ends_with(".tar.gz") || name_str.ends_with(".whl")) {
-                                    log::debug!("Found package in cache: {}", name_str);
-                                    if let Ok(data) = fs::read(file.path()) {
-                                        return Some(data);
-                                    }
+                            // Look for files matching the package name
+                            if name_str.contains(package_name)
+                                && (name_str.ends_with(".tar.gz") || name_str.ends_with(".whl"))
+                            {
+                                log::debug!("Found package in cache: {}", name_str);
+                                if let Ok(data) = fs::read(file.path()) {
+                                    return Some(data);
                                 }
                             }
                         }
@@ -78,7 +80,11 @@ pub async fn download_and_extract_package(
 
     // Cache miss - fetch download URL from PyPI JSON API
     let url = if let Some(version) = package_version {
-        log::info!("Fetching download URL for '{}' version {}...", package_name, version);
+        log::info!(
+            "Fetching download URL for '{}' version {}...",
+            package_name,
+            version
+        );
         match fetch_download_url(package_name, version).await {
             Ok(url) => url,
             Err(e) => {
@@ -172,7 +178,8 @@ async fn download_package_fallback(package_name: &str) -> Result<PackageContents
     let html = response.text().await?;
 
     // Prefer .tar.gz (source distribution), but fall back to .whl (wheel)
-    let distribution_url = html.lines()
+    let distribution_url = html
+        .lines()
         .find(|line| line.contains(".tar.gz") && line.contains("href="))
         .and_then(extract_href)
         .or_else(|| {
@@ -185,13 +192,10 @@ async fn download_package_fallback(package_name: &str) -> Result<PackageContents
     if let Some(dist_url) = distribution_url {
         log::info!("Found package at: {}", dist_url);
 
-        let response = reqwest::Client::new()
-            .get(&dist_url)
-            .send()
-            .await?;
+        let response = reqwest::Client::new().get(&dist_url).send().await?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to download from fallback URL").into());
+            return Err("Failed to download from fallback URL".to_string().into());
         }
 
         let package_data = response.bytes().await?;
@@ -227,10 +231,10 @@ async fn download_package_fallback(package_name: &str) -> Result<PackageContents
 
 /// Extract href value from HTML line
 fn extract_href(line: &str) -> Option<String> {
-    if let Some(start) = line.find("href=\"") {
-        if let Some(end) = line[start + 6..].find('"') {
-            return Some(line[start + 6..start + 6 + end].to_string());
-        }
+    if let Some(start) = line.find("href=\"")
+        && let Some(end) = line[start + 6..].find('"')
+    {
+        return Some(line[start + 6..start + 6 + end].to_string());
     }
     None
 }
@@ -278,7 +282,7 @@ fn find_python_files(root: &std::path::Path) -> Result<Vec<PathBuf>, Box<dyn Err
     for entry in WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "py"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "py"))
     {
         files.push(entry.path().to_path_buf());
     }
@@ -331,11 +335,7 @@ pub fn extract_source_for_analysis(
             }
             Err(e) => {
                 // Log but continue if we can't read a file
-                eprintln!(
-                    "Warning: Could not read {}: {}",
-                    file_path.display(),
-                    e
-                );
+                eprintln!("Warning: Could not read {}: {}", file_path.display(), e);
             }
         }
     }
@@ -425,12 +425,7 @@ async fn fetch_download_url_latest(package_name: &str) -> Result<(String, String
     // Get the latest version from info
     let version = json_data["info"]["version"]
         .as_str()
-        .ok_or_else(|| {
-            format!(
-                "Could not extract version from PyPI for '{}'",
-                package_name
-            )
-        })?
+        .ok_or_else(|| format!("Could not extract version from PyPI for '{}'", package_name))?
         .to_string();
 
     // Get the releases for this version

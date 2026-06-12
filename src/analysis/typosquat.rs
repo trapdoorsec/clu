@@ -14,18 +14,18 @@ struct PopularPackagesResponse {
     source: String,
     #[allow(dead_code)]
     #[serde(default)]
-    meta: serde_json::Value,  // Changed from Vec<String> to accept any format
+    meta: serde_json::Value, // Changed from Vec<String> to accept any format
     rows: Vec<PackageRow>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct PackageRow {
     #[allow(dead_code)]
-    download_count: u64,  // Changed from String to u64 (actual API returns integer)
+    download_count: u64, // Changed from String to u64 (actual API returns integer)
     project: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TypoSquatterMatch {
     pub rule_name: String,
     pub risk_score: u8,
@@ -47,8 +47,14 @@ async fn get_popular_packages(conf: &FeedConfig) -> Vec<PackageRow> {
                 match response.text().await {
                     Ok(body) => {
                         log::warn!("HTTP {} from popular packages endpoint", status);
-                        log::warn!("Response (first 200 chars): {}",
-                                  if body.len() > 200 { &body[..200] } else { &body });
+                        log::warn!(
+                            "Response (first 200 chars): {}",
+                            if body.len() > 200 {
+                                &body[..200]
+                            } else {
+                                &body
+                            }
+                        );
                     }
                     Err(e) => {
                         log::warn!("HTTP {} - could not read response body: {}", status, e);

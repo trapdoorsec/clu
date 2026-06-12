@@ -1,4 +1,7 @@
-use clap::{ArgMatches, Parser};
+//! This file contains the main entry point for the application.
+//! It initializes the logging system and handles the command-line arguments.
+
+use clap::ArgMatches;
 use clap::{arg, command};
 
 use crate::analysis::heuristics;
@@ -8,18 +11,26 @@ use crate::config::Config;
 mod analysis;
 mod cli;
 mod config;
+mod db;
 mod feed;
-mod output;
 mod glitch;
 mod init;
+mod output;
 
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Args {
-    #[arg(short, long)]
-    file: String,
-}
-
+/// Main entry point for the CLU (Command Line Utility) malware scanner.
+///
+/// This function orchestrates the application startup sequence:
+/// 1. Displays the ASCII art banner with some fun character animations
+/// 2. Parses command-line arguments using clap
+/// 3. Initializes the logging system based on config.toml settings
+/// 4. Routes to the appropriate command handler (init, watch, or scan)
+///
+/// # Subcommands
+/// - `init`: Interactive configuration setup (creates config.toml)
+/// - `watch`: Continuously monitor PyPI RSS feed for new packages
+/// - `scan`: Analyze a specific package (TODO: not fully implemented)
+///
+/// If no subcommand is provided, only the banner is shown and the program exits.
 fn main() {
     print_banner();
     let cmd = command_builder().get_matches();
@@ -118,20 +129,26 @@ fn handle_watch(args: &ArgMatches) {
     let check_updates = if args.get_flag("check-updates") {
         true
     } else {
-        config.as_ref().map(|c| c.feed.check_updates).unwrap_or(false)
+        config
+            .as_ref()
+            .map(|c| c.feed.check_updates)
+            .unwrap_or(false)
     };
 
     // Show what configuration is being used
     if config.is_some() {
         println!("{}", ".oO( Loaded configuration from config.toml )".green());
     } else {
-        println!("{}", "ℹ No config.toml found, using defaults. Run 'clu init' to create one.".yellow());
+        println!(
+            "{}",
+            "ℹ No config.toml found, using defaults. Run 'clu init' to create one.".yellow()
+        );
     }
 
     // Run the async watch function
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        if let Err(e) = watch_feed(url, poll_interval, check_updates).await {
+        if let Err(e) = watch_feed(url, poll_interval, check_updates, config.as_ref()).await {
             eprintln!("❌ Watch failed: {}", e);
             std::process::exit(1);
         }
@@ -147,6 +164,7 @@ async fn watch_feed(
     url: &str,
     poll_interval: std::time::Duration,
     _check_updates: bool,
+    config_opt: Option<&Config>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use owo_colors::OwoColorize;
     use std::collections::HashSet;
@@ -161,7 +179,12 @@ async fn watch_feed(
     println!("{}", "━".repeat(60).bright_cyan());
 
     // Load configuration and heuristics
-    let config = Config::load("config.toml").ok();
+    let loaded_config = if config_opt.is_none() {
+        Config::load("config.toml").ok()
+    } else {
+        None
+    };
+    let config = config_opt.or(loaded_config.as_ref());
     let heuristics = match analysis::heuristics::HeuristicRules::load("heuristics.toml") {
         Ok(h) => {
             println!("{}", ".:* Loaded heuristics rules".green());
@@ -171,6 +194,28 @@ async fn watch_feed(
             eprintln!("{} Failed to load heuristics: {}", "[!]".yellow(), e);
             None
         }
+    };
+
+    // Initialize database if enabled
+    let database = if let Some(cfg) = &config {
+        if cfg.database.enable {
+            match db::Database::new(&cfg.database.url).await {
+                Ok(db) => {
+                    println!("{}", ".:* Database initialized".green());
+                    Some(db)
+                }
+                Err(e) => {
+                    eprintln!("{} Failed to initialize database: {}", "[!]".yellow(), e);
+                    eprintln!("{} Continuing without database persistence", "[!]".yellow());
+                    None
+                }
+            }
+        } else {
+            println!("{}", ".:* Database disabled in config".yellow());
+            None
+        }
+    } else {
+        None
     };
 
     let mut seen_packages: HashSet<String> = HashSet::new();
@@ -203,20 +248,70 @@ async fn watch_feed(
                             if let Some(title) = &package.title {
                                 seen_packages.insert(title.clone());
 
+                                // Update status: queued
+                                if let Some(ref db) = database {
+                                    let _ = db
+                                        .update_package_status(
+                                            title,
+                                            db::PackageStatus::Queued,
+                                            None,
+                                        )
+                                        .await;
+                                }
+
                                 // Run analysis
-                                match analyze_package(package, &config, &heuristics).await {
+                                match analyze_package(package, config, &heuristics, &database).await
+                                {
                                     Ok(report) => {
+                                        // Display report
                                         use output::Formatter;
                                         let formatter = output::formatters::coloured_text::ColouredTextFormatter {};
                                         let formatted = formatter.format_report(&report);
                                         println!("{}", formatted);
+
+                                        // Save to database
+                                        if let Some(ref db) = database {
+                                            match db.insert_report(&report).await {
+                                                Ok(id) => {
+                                                    log::debug!(
+                                                        "Saved report to database with ID: {}",
+                                                        id
+                                                    );
+                                                    let _ = db
+                                                        .update_package_status(
+                                                            title,
+                                                            db::PackageStatus::Completed,
+                                                            None,
+                                                        )
+                                                        .await;
+                                                }
+                                                Err(e) => {
+                                                    log::warn!(
+                                                        "Failed to save report to database: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                     Err(e) => {
-                                        eprintln!("{} Analysis failed for {}: {}",
+                                        eprintln!(
+                                            "{} Analysis failed for {}: {}",
                                             "[!]".red(),
                                             title.yellow(),
                                             e
                                         );
+
+                                        // Mark as failed in database
+                                        if let Some(ref db) = database {
+                                            let _ = db
+                                                .update_package_status(
+                                                    title,
+                                                    db::PackageStatus::Failed,
+                                                    Some(&e.to_string()),
+                                                )
+                                                .await;
+                                        }
                                     }
                                 }
                             }
@@ -239,13 +334,21 @@ async fn watch_feed(
 
 async fn analyze_package(
     package: &feed::pypi::PythonPackage,
-    config: &Option<Config>,
+    config: Option<&Config>,
     heuristics: &Option<analysis::heuristics::HeuristicRules>,
+    database: &Option<db::Database>,
 ) -> Result<output::AnalysisReport, Box<dyn std::error::Error>> {
     use chrono::Utc;
 
     let package_name = package.title.as_deref().unwrap_or("unknown");
-    let pipeline_config = config.as_ref().map(|c| &c.pipeline);
+    let pipeline_config = config.map(|c| &c.pipeline);
+
+    // Update status: starting heuristics
+    if let Some(db) = database {
+        let _ = db
+            .update_package_status(package_name, db::PackageStatus::Heuristics, None)
+            .await;
+    }
 
     // Run Stages 1 & 2 concurrently (these are always fast)
     let (heuristic_matches, typosquat_matches) = tokio::join!(
@@ -253,17 +356,14 @@ async fn analyze_package(
         run_typosquat_stage(package, config, pipeline_config)
     );
 
-    // Calculate risk score based on Tier 1 findings
-    let mut risk_score: u8 = 0;
-    for h in &heuristic_matches {
-        risk_score = risk_score.saturating_add(h.risk_score / 2);
+    // Update status: typosquat completed
+    if let Some(db) = database {
+        let _ = db
+            .update_package_status(package_name, db::PackageStatus::Typosquat, None)
+            .await;
     }
-    for t in &typosquat_matches {
-        risk_score = risk_score.saturating_add(t.risk_score / 2);
-    }
-    risk_score = risk_score.min(100);
 
-    // Determine if we need to download package for stages 3 & 4
+    // Determine if we need to download package for GuardDog and LLM
     let guarddog_enabled = is_stage_enabled(pipeline_config.map(|p| p.guarddog));
     let llm_enabled = is_stage_enabled(pipeline_config.map(|p| p.llm));
 
@@ -274,16 +374,66 @@ async fn analyze_package(
         None
     };
 
-    let (guarddog_result, llm_analysis) = tokio::join!(
-        run_guarddog_stage(package_name, &package_result, guarddog_enabled),
-        run_llm_stage(package_name, config, &package_result, llm_enabled)
-    );
+    // Run GuardDog stage
+    if guarddog_enabled {
+        if let Some(db) = database {
+            let _ = db
+                .update_package_status(package_name, db::PackageStatus::GuardDog, None)
+                .await;
+        }
+    }
 
-    // Determine recommendation based on risk score
-    let (is_malicious, recommendation) = match risk_score {
-        0..=30 => (false, "SAFE".to_string()),
-        31..=70 => (false, "REVIEW".to_string()),
-        _ => (true, "BLOCK".to_string()),
+    let guarddog_result = run_guarddog_stage(package_name, &package_result, guarddog_enabled).await;
+
+    // Run LLM stage last - it aggregates all findings
+    let llm_analysis = if llm_enabled {
+        if let Some(db) = database {
+            let _ = db
+                .update_package_status(package_name, db::PackageStatus::Llm, None)
+                .await;
+        }
+        run_llm_stage(
+            package_name,
+            config,
+            &package_result,
+            &heuristic_matches,
+            &typosquat_matches,
+            &guarddog_result,
+            llm_enabled,
+        )
+        .await
+    } else {
+        None
+    };
+
+    // Determine final severity and recommendation
+    let (severity, is_malicious, recommendation) = if let Some(ref llm) = llm_analysis {
+        // Use LLM assessment as final authority
+        let rec = if llm.severity <= 4 {
+            "IGNORE"
+        } else {
+            "INSPECT"
+        };
+        (llm.severity, llm.is_malicious, rec.to_string())
+    } else {
+        // Fallback: calculate basic severity from findings
+        let finding_count = heuristic_matches.len()
+            + typosquat_matches.len()
+            + guarddog_result
+                .as_ref()
+                .map(|g| g.findings.len())
+                .unwrap_or(0);
+
+        let severity = if finding_count == 0 {
+            1 // NONE * NONE
+        } else if finding_count <= 2 {
+            6 // MEDIUM * UNLIKELY
+        } else {
+            12 // HIGH * LIKELY
+        };
+
+        let rec = if severity <= 4 { "IGNORE" } else { "INSPECT" };
+        (severity, finding_count > 3, rec.to_string())
     };
 
     Ok(output::AnalysisReport {
@@ -292,10 +442,10 @@ async fn analyze_package(
         timestamp: Utc::now().to_rfc3339(),
         heuristic_matches,
         typosquat_matches,
+        guarddog_result,
         injection_detection: None,
         llm_analysis,
-        guarddog_result,
-        overall_risk_score: risk_score,
+        severity,
         is_malicious,
         recommendation,
     })
@@ -307,7 +457,6 @@ async fn run_heuristics_stage(
     heuristics: &Option<analysis::heuristics::HeuristicRules>,
     pipeline_config: Option<&config::PipelineConfig>,
 ) -> Vec<output::HeuristicMatch> {
-
     if !is_stage_enabled(pipeline_config.map(|p| p.heuristics)) {
         return Vec::new();
     }
@@ -324,14 +473,18 @@ async fn run_heuristics_stage(
         }
     }
 
-    log::debug!("Stage 1: Heuristics analysis completed for {} ({} matches)", pkg_name, matches.len());
+    log::debug!(
+        "Stage 1: Heuristics analysis completed for {} ({} matches)",
+        pkg_name,
+        matches.len()
+    );
     matches
 }
 
 /// Stage 2: Typosquat Detection
 async fn run_typosquat_stage(
     package: &feed::pypi::PythonPackage,
-    config: &Option<Config>,
+    config: Option<&Config>,
     pipeline_config: Option<&config::PipelineConfig>,
 ) -> Vec<output::TypoSquatterMatch> {
     use owo_colors::OwoColorize;
@@ -344,18 +497,30 @@ async fn run_typosquat_stage(
     log::debug!("Stage 2: Starting typosquat analysis for {}", pkg_name);
 
     if let Some(cfg) = config {
-        match analysis::typosquat::find_typosquatters(vec![package.clone()], cfg).await {
+        match analysis::typosquat::find_typosquatters(vec![package.clone()], &cfg).await {
             Ok(matches) => {
-                log::debug!("Stage 2: Typosquat analysis completed for {} ({} matches)", pkg_name, matches.len());
+                log::debug!(
+                    "Stage 2: Typosquat analysis completed for {} ({} matches)",
+                    pkg_name,
+                    matches.len()
+                );
                 matches
             }
             Err(e) => {
-                eprintln!("{} Stage 2: Typosquat analysis failed for {}: {}", "[!]".yellow(), pkg_name.yellow(), e);
+                eprintln!(
+                    "{} Stage 2: Typosquat analysis failed for {}: {}",
+                    "[!]".yellow(),
+                    pkg_name.yellow(),
+                    e
+                );
                 Vec::new()
             }
         }
     } else {
-        eprintln!("{} Stage 2: Config not found, skipping typosquat analysis", "[!]".yellow());
+        eprintln!(
+            "{} Stage 2: Config not found, skipping typosquat analysis",
+            "[!]".yellow()
+        );
         Vec::new()
     }
 }
@@ -363,7 +528,9 @@ async fn run_typosquat_stage(
 /// Stage 3: GuardDog Analysis
 async fn run_guarddog_stage(
     package_name: &str,
-    _package_result: &Option<Result<analysis::package::PackageContents, Box<dyn std::error::Error>>>,
+    _package_result: &Option<
+        Result<analysis::package::PackageContents, Box<dyn std::error::Error>>,
+    >,
     enabled: bool,
 ) -> Option<output::GuardDogResult> {
     use owo_colors::OwoColorize;
@@ -379,18 +546,25 @@ async fn run_guarddog_stage(
             Some(result)
         }
         Err(e) => {
-            eprintln!("{} Stage 3: GuardDog analysis failed for {}: {}",
-                "[!]".yellow(), package_name.yellow(), e);
+            eprintln!(
+                "{} Stage 3: GuardDog analysis failed for {}: {}",
+                "[!]".yellow(),
+                package_name.yellow(),
+                e
+            );
             None
         }
     }
 }
 
-/// Stage 4: LLM Analysis with Prompt Injection Detection
+/// Stage 4: LLM Analysis with Prompt Injection Detection (Aggregates all findings)
 async fn run_llm_stage(
     package_name: &str,
-    config: &Option<Config>,
+    config: Option<&Config>,
     package_result: &Option<Result<analysis::package::PackageContents, Box<dyn std::error::Error>>>,
+    heuristic_matches: &[output::HeuristicMatch],
+    typosquat_matches: &[output::TypoSquatterMatch],
+    guarddog_result: &Option<output::GuardDogResult>,
     enabled: bool,
 ) -> Option<output::LlmAnalysisResult> {
     use owo_colors::OwoColorize;
@@ -401,18 +575,23 @@ async fn run_llm_stage(
 
     log::debug!("Stage 4: Starting LLM analysis for {}", package_name);
 
-    if let Some(cfg) = config.as_ref().map(|c| &c.llm) {
+    if let Some(cfg) = config.map(|c| &c.llm) {
         // Check if package download succeeded
         let package_contents = match package_result {
             Some(Ok(contents)) => contents,
             Some(Err(e)) => {
-                eprintln!("{} Stage 4: Package download failed, cannot run LLM analysis: {}",
-                    "[!]".yellow(), e);
+                eprintln!(
+                    "{} Stage 4: Package download failed, cannot run LLM analysis: {}",
+                    "[!]".yellow(),
+                    e
+                );
                 return None;
             }
             None => {
-                eprintln!("{} Stage 4: Package download was not attempted, cannot run LLM analysis",
-                    "[!]".yellow());
+                eprintln!(
+                    "{} Stage 4: Package download was not attempted, cannot run LLM analysis",
+                    "[!]".yellow()
+                );
                 return None;
             }
         };
@@ -421,36 +600,87 @@ async fn run_llm_stage(
         match analysis::package::extract_source_for_analysis(package_contents, 10, 5000) {
             Ok(source_code) => {
                 // Check for prompt injection first (sentinel)
-                match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await {
+                match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await
+                {
                     Ok(injection_result) => {
                         if injection_result.injection_detected {
-                            eprintln!("{} Prompt injection detected in {}",
-                                "[!]".red(), package_name.yellow());
+                            eprintln!(
+                                "{} Prompt injection detected in {}",
+                                "[!]".red(),
+                                package_name.yellow()
+                            );
                             return None;
                         }
 
+                        // Aggregate findings for LLM assessment
+                        let heuristic_findings: Vec<String> = heuristic_matches
+                            .iter()
+                            .map(|h| format!("{}: {}", h.rule_name, h.description))
+                            .collect();
+
+                        let typosquat_findings: Vec<String> = typosquat_matches
+                            .iter()
+                            .map(|t| t.evidence.clone())
+                            .collect();
+
+                        let guarddog_findings: Vec<String> = guarddog_result
+                            .as_ref()
+                            .map(|g| {
+                                g.findings
+                                    .iter()
+                                    .map(|f| {
+                                        format!(
+                                            "{} [{}]: {}",
+                                            f.rule_name, f.severity, f.description
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
                         // Safe to proceed with analysis
-                        match analysis::llm::analyze_package_code(package_name, &source_code, cfg).await {
+                        match analysis::llm::analyze_package_code(
+                            package_name,
+                            &source_code,
+                            &heuristic_findings,
+                            &typosquat_findings,
+                            &guarddog_findings,
+                            cfg,
+                        )
+                        .await
+                        {
                             Ok(result) => {
                                 log::debug!("Stage 4: LLM analysis completed for {}", package_name);
                                 Some(result)
                             }
                             Err(e) => {
-                                eprintln!("{} Stage 4: LLM analysis failed for {}: {}",
-                                    "[!]".yellow(), package_name.yellow(), e);
+                                eprintln!(
+                                    "{} Stage 4: LLM analysis failed for {}: {}",
+                                    "[!]".yellow(),
+                                    package_name.yellow(),
+                                    e
+                                );
                                 None
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("{} Stage 4: Injection detection failed for {}: {}",
-                            "[!]".yellow(), package_name.yellow(), e);
+                        eprintln!(
+                            "{} Stage 4: Injection detection failed for {}: {}",
+                            "[!]".yellow(),
+                            package_name.yellow(),
+                            e
+                        );
                         None
                     }
                 }
             }
             Err(e) => {
-                eprintln!("{} Stage 4: Failed to extract source code: {}", "[!]".yellow(), e);
+                eprintln!(
+                    "{} Stage 4: Failed to extract source code: {}",
+                    "[!]".yellow(),
+                    e
+                );
                 None
             }
         }
