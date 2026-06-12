@@ -19,6 +19,7 @@ use axum::{
     http::StatusCode,
     routing::{get, patch, post},
 };
+use subtle::ConstantTimeEq;
 
 pub use self::findings::{CreateFindingRequest, FindingResponse, PatchFindingRequest};
 
@@ -26,11 +27,16 @@ pub use self::findings::{CreateFindingRequest, FindingResponse, PatchFindingRequ
 pub struct AppState {
     pub db: crate::db::Database,
     pub token: Option<String>,
+    pub listen_addr: String,
 }
 
 /// Build the axum router with all API routes.
-pub fn router(db: crate::db::Database, token: Option<String>) -> Router {
-    let state = AppState { db, token };
+pub fn router(db: crate::db::Database, token: Option<String>, listen_addr: String) -> Router {
+    let state = AppState {
+        db,
+        token,
+        listen_addr,
+    };
 
     Router::new()
         .route("/healthz", get(health::healthz))
@@ -76,18 +82,55 @@ impl axum::response::IntoResponse for AppError {
     }
 }
 
-/// Check auth: if token is configured, require a matching Bearer header.
-/// Returns Ok(()) if no token is configured or if the token matches.
-pub fn require_auth(auth_header: Option<&str>, expected: &Option<String>) -> Result<(), AppError> {
+/// Returns true if the listen address is a loopback address.
+///
+/// Parses host:port and checks if the host portion resolves to a loopback
+/// interface (127.0.0.0/8, ::1, or "localhost").
+pub fn is_loopback(listen_addr: &str) -> bool {
+    let host = listen_addr
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(listen_addr);
+    if host == "localhost" {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
+}
+
+/// Fail-closed authentication check.
+///
+/// - If a token is configured, requires a matching Bearer header (constant-time compare).
+/// - If no token is configured AND the bind address is loopback, allows access.
+/// - If no token is configured AND the bind address is NOT loopback, rejects access.
+///
+/// This prevents accidentally exposing the API on public interfaces without auth.
+pub fn require_auth(
+    auth_header: Option<&str>,
+    expected: &Option<String>,
+    listen_addr: &str,
+) -> Result<(), AppError> {
     match expected {
-        None => Ok(()),
         Some(secret) => {
             let provided = auth_header
                 .and_then(|h| h.strip_prefix("Bearer "))
                 .map(|s| s.trim());
             match provided {
-                Some(tok) if tok == secret => Ok(()),
+                Some(tok) if secret.as_bytes().ct_eq(tok.as_bytes()).into() => Ok(()),
                 _ => Err(AppError::Unauthorized),
+            }
+        }
+        None => {
+            if is_loopback(listen_addr) {
+                Ok(())
+            } else {
+                log::error!(
+                    "Rejecting unauthenticated request: no token configured and bind address {:?} is not loopback",
+                    listen_addr
+                );
+                Err(AppError::Unauthorized)
             }
         }
     }

@@ -89,7 +89,7 @@ pub async fn create_finding(
     Json(body): Json<CreateFindingRequest>,
 ) -> Result<Json<FindingResponse>, AppError> {
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
-    require_auth(auth, &state.token)?;
+    require_auth(auth, &state.token, &state.listen_addr)?;
 
     let report = body.report;
     let ecosystem_str = serde_json::to_string(&report.ecosystem)
@@ -144,6 +144,7 @@ pub async fn list_findings(
     require_auth(
         headers.get("authorization").and_then(|v| v.to_str().ok()),
         &state.token,
+        &state.listen_addr,
     )?;
 
     let filters = FindingFilters {
@@ -175,6 +176,7 @@ pub async fn get_finding(
     require_auth(
         headers.get("authorization").and_then(|v| v.to_str().ok()),
         &state.token,
+        &state.listen_addr,
     )?;
 
     let finding = state
@@ -194,7 +196,7 @@ pub async fn update_finding(
     Json(body): Json<PatchFindingRequest>,
 ) -> Result<Json<FindingResponse>, AppError> {
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
-    require_auth(auth, &state.token)?;
+    require_auth(auth, &state.token, &state.listen_addr)?;
 
     let status = body
         .status
@@ -234,6 +236,7 @@ pub async fn get_finding_report(
     require_auth(
         headers.get("authorization").and_then(|v| v.to_str().ok()),
         &state.token,
+        &state.listen_addr,
     )?;
 
     let finding = state

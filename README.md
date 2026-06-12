@@ -612,7 +612,7 @@ clu-api
 docker-compose up -d clu-api
 ```
 
-**Endpoints** (all require `Authorization: Bearer <token>` when `[sidecar] token` is configured):
+**Endpoints** (authentication required unless bound to loopback without a token — see below):
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -622,6 +622,26 @@ docker-compose up -d clu-api
 | `PATCH` | `/findings/{id}` | Update triage status, classification, analyst notes |
 | `GET` | `/findings/{id}/report` | OpenSourceMalware-shaped JSON export (includes linked scan evidence) |
 | `GET` | `/healthz` | Liveness probe (unauthenticated) |
+
+**Authentication behavior:**
+
+The sidecar API uses fail-closed authentication:
+
+| Token configured? | Bind address | Behavior |
+|---|---|---|
+| Yes | Any | Require `Authorization: Bearer <token>` (constant-time comparison) |
+| No | Loopback (`127.x.x.x`, `::1`, `localhost`) | Allow without token |
+| No | Non-loopback (`0.0.0.0`, public IP) | **Refuse to start** (exit 1) |
+
+When the `[sidecar] token` is not configured and `listen_addr` is not a loopback address, `clu-api` will exit immediately on startup with an error message. This prevents accidentally exposing the API on a public interface without authentication.
+
+To configure authentication:
+
+```toml
+[sidecar]
+token = "your-shared-secret-here"   # Required for non-loopback deployments
+listen_addr = "127.0.0.1:8080"       # Default: loopback only
+```
 
 **Example requests:**
 

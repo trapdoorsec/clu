@@ -422,35 +422,37 @@ async fn analyze_package(
         None
     };
 
-    // Determine final severity and recommendation
-    let (severity, is_malicious, recommendation) = if let Some(ref llm) = llm_analysis {
-        // Use LLM assessment as final authority
-        let rec = if llm.severity <= 4 {
-            "IGNORE"
-        } else {
-            "INSPECT"
-        };
-        (llm.severity, llm.is_malicious, rec.to_string())
+    // Compute static floor from non-manipulable tiers (heuristics + typosquat + GuardDog).
+    // The LLM can escalate but NEVER de-escalate below this floor, because an LLM
+    // evaluating attacker-controlled text is inherently injectable.
+    let static_finding_count = heuristic_matches.len()
+        + typosquat_matches.len()
+        + guarddog_result
+            .as_ref()
+            .map(|g| g.findings.len())
+            .unwrap_or(0);
+
+    let static_severity = if static_finding_count == 0 {
+        1 // NONE * NONE
+    } else if static_finding_count <= 2 {
+        6 // MEDIUM * UNLIKELY
     } else {
-        // Fallback: calculate basic severity from findings
-        let finding_count = heuristic_matches.len()
-            + typosquat_matches.len()
-            + guarddog_result
-                .as_ref()
-                .map(|g| g.findings.len())
-                .unwrap_or(0);
-
-        let severity = if finding_count == 0 {
-            1 // NONE * NONE
-        } else if finding_count <= 2 {
-            6 // MEDIUM * UNLIKELY
-        } else {
-            12 // HIGH * LIKELY
-        };
-
-        let rec = if severity <= 4 { "IGNORE" } else { "INSPECT" };
-        (severity, finding_count > 3, rec.to_string())
+        12 // HIGH * LIKELY
     };
+    let static_is_malicious = static_finding_count > 3;
+
+    // Merge: LLM can escalate but never de-escalate below the static floor.
+    // is_malicious = OR of LLM and static (either flag is definitive).
+    // severity = MAX of LLM and static (worst case wins).
+    let (severity, is_malicious) = if let Some(ref llm) = llm_analysis {
+        let merged_severity = llm.severity.max(static_severity);
+        let merged_is_malicious = llm.is_malicious || static_is_malicious;
+        (merged_severity, merged_is_malicious)
+    } else {
+        (static_severity, static_is_malicious)
+    };
+
+    let recommendation = if severity <= 4 { "IGNORE" } else { "INSPECT" }.to_string();
 
     Ok(output::AnalysisReport {
         package_name: package_name.to_string(),
@@ -621,8 +623,41 @@ async fn run_llm_stage(
         let bundle = analysis::package::build_source_bundle(package_contents, 15000);
         let source_code = analysis::package::format_source_bundle(&bundle);
 
-        // Check for prompt injection first (sentinel)
-        match analysis::llm::detect_prompt_injection(package_name, &source_code, cfg).await {
+        // Aggregate findings for LLM assessment
+        let heuristic_findings: Vec<String> = heuristic_matches
+            .iter()
+            .map(|h| format!("{}: {}", h.rule_name, h.description))
+            .collect();
+
+        let typosquat_findings: Vec<String> = typosquat_matches
+            .iter()
+            .map(|t| t.evidence.clone())
+            .collect();
+
+        let guarddog_findings: Vec<String> = guarddog_result
+            .as_ref()
+            .map(|g| {
+                g.findings
+                    .iter()
+                    .map(|f| format!("{} [{}]: {}", f.rule_name, f.severity, f.description))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Build the single attacker-influenced body that both the sentinel
+        // and the main analysis will receive. This eliminates the window-gap
+        // injection vulnerability where sentinel and analysis saw different
+        // truncations of the same data.
+        let body = analysis::llm::build_prompt_body(
+            package_name,
+            &source_code,
+            &heuristic_findings,
+            &typosquat_findings,
+            &guarddog_findings,
+        );
+
+        // Check for prompt injection first (sentinel checks the SAME body)
+        match analysis::llm::detect_prompt_injection(&body, cfg).await {
             Ok(injection_result) => {
                 if injection_result.injection_detected {
                     eprintln!(
@@ -633,38 +668,8 @@ async fn run_llm_stage(
                     return None;
                 }
 
-                // Aggregate findings for LLM assessment
-                let heuristic_findings: Vec<String> = heuristic_matches
-                    .iter()
-                    .map(|h| format!("{}: {}", h.rule_name, h.description))
-                    .collect();
-
-                let typosquat_findings: Vec<String> = typosquat_matches
-                    .iter()
-                    .map(|t| t.evidence.clone())
-                    .collect();
-
-                let guarddog_findings: Vec<String> = guarddog_result
-                    .as_ref()
-                    .map(|g| {
-                        g.findings
-                            .iter()
-                            .map(|f| format!("{} [{}]: {}", f.rule_name, f.severity, f.description))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // Safe to proceed with analysis
-                match analysis::llm::analyze_package_code(
-                    package_name,
-                    &source_code,
-                    &heuristic_findings,
-                    &typosquat_findings,
-                    &guarddog_findings,
-                    cfg,
-                )
-                .await
-                {
+                // Safe to proceed with analysis (same body passed to main analysis)
+                match analysis::llm::analyze_package_code(&body, cfg).await {
                     Ok(result) => {
                         log::debug!("Stage 4: LLM analysis completed for {}", package_name);
                         Some(result)
