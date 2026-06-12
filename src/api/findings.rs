@@ -138,8 +138,14 @@ pub async fn create_finding(
 
 pub async fn list_findings(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<ListQuery>,
 ) -> Result<Json<Vec<FindingResponse>>, AppError> {
+    require_auth(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        &state.token,
+    )?;
+
     let filters = FindingFilters {
         ecosystem: params.ecosystem,
         status: params.status,
@@ -163,8 +169,14 @@ pub async fn list_findings(
 
 pub async fn get_finding(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<FindingResponse>, AppError> {
+    require_auth(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        &state.token,
+    )?;
+
     let finding = state
         .db
         .get_finding(id)
@@ -216,8 +228,14 @@ pub async fn update_finding(
 
 pub async fn get_finding_report(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    require_auth(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        &state.token,
+    )?;
+
     let finding = state
         .db
         .get_finding(id)

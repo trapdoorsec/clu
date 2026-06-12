@@ -43,5 +43,4 @@ zip = "0.6"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
 sha2 = "0.10"
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
 thiserror = "2"

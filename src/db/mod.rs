@@ -84,7 +84,9 @@ impl Database {
 
         let options = SqliteConnectOptions::from_str(database_url)?
             .create_if_missing(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .foreign_keys(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -95,11 +97,6 @@ impl Database {
 
         // Run migrations
         db.run_migrations().await?;
-
-        // Enable WAL mode for concurrent read/write access (two binaries share one DB)
-        sqlx::query("PRAGMA journal_mode=WAL")
-            .execute(&db.pool)
-            .await?;
 
         Ok(db)
     }
