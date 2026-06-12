@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::config::{Config, FeedConfig};
-use crate::feed::pypi::PythonPackage;
+use crate::feed::ecosystem::PackageRef;
 use levenshtein::levenshtein;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -109,7 +109,7 @@ fn calculate_confidence(distance: usize, pkg_len: usize) -> f32 {
 }
 
 pub async fn find_typosquatters(
-    new_packages: Vec<PythonPackage>,
+    new_packages: &[PackageRef],
     config: &Config,
 ) -> Result<Vec<TypoSquatterMatch>, Box<dyn Error>> {
     let threshold = config.analysis.typosquat_distance_threshold;
@@ -126,7 +126,7 @@ pub async fn find_typosquatters(
     let mut typosquats: Vec<TypoSquatterMatch> = Vec::new();
 
     // Iterate over new packages
-    for new_pkg in &new_packages {
+    for new_pkg in new_packages {
         // Extract package name, skip if missing
         let new_pkg_name = match &new_pkg.title {
             Some(name) => name.as_str(),

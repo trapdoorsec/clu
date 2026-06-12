@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-use crate::feed;
-use feed::pypi::PythonPackage;
+use crate::feed::ecosystem::PackageRef;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -248,7 +247,7 @@ pub fn validate_heuristics_file(path: &str) -> Result<(), Vec<String>> {
     }
 }
 
-pub fn apply_rule(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicMatch> {
+pub fn apply_rule(rule: HeuristicRule, pkg: &PackageRef) -> Option<HeuristicMatch> {
     match rule.rule_type.as_str() {
         "keyword" => check_keywords(rule, pkg),
         "regex" => check_regex(rule, pkg),
@@ -257,7 +256,7 @@ pub fn apply_rule(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicM
     }
 }
 
-fn check_metadata(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicMatch> {
+fn check_metadata(rule: HeuristicRule, pkg: &PackageRef) -> Option<HeuristicMatch> {
     let field = rule.field.as_deref()?;
     let check = rule.check.as_deref()?;
 
@@ -289,7 +288,7 @@ fn check_metadata(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicM
     }
 }
 
-fn check_regex(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicMatch> {
+fn check_regex(rule: HeuristicRule, pkg: &PackageRef) -> Option<HeuristicMatch> {
     let pattern = rule.pattern.as_deref()?;
     let field = rule.field.as_deref()?;
 
@@ -319,7 +318,7 @@ fn check_regex(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicMatc
     }
 }
 
-fn check_keywords(rule: HeuristicRule, pkg: &PythonPackage) -> Option<HeuristicMatch> {
+fn check_keywords(rule: HeuristicRule, pkg: &PackageRef) -> Option<HeuristicMatch> {
     let keywords = rule.keywords.as_ref()?;
     let field = rule.field.as_deref()?;
 

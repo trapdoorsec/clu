@@ -6,6 +6,7 @@ use clap::{arg, command};
 
 use crate::analysis::heuristics;
 use crate::config::Config;
+use crate::feed::ecosystem::{PackageRef, PyPIRegistry};
 
 // modules
 mod analysis;
@@ -219,107 +220,108 @@ async fn watch_feed(
     };
 
     let mut seen_packages: HashSet<String> = HashSet::new();
-    let feed_url = url::Url::parse(url)?;
+
+    // Build registry for PyPI
+    let pypi_registry = PyPIRegistry::new(
+        url,
+        config
+            .map(|c| c.feed.popular_packages_endpoint.as_str())
+            .unwrap_or("https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json"),
+    );
 
     loop {
-        match feed::fetch_rss(&feed_url).await {
-            Ok(channel) => {
-                if let Some(packages) = feed::serialize_packages(channel).await {
-                    let new_packages: Vec<_> = packages
-                        .into_iter()
-                        .filter(|p| {
-                            if let Some(title) = &p.title {
-                                !seen_packages.contains(title)
-                            } else {
-                                false
+        match pypi_registry.fetch_feed().await {
+            Ok(packages) => {
+                let new_packages: Vec<_> = packages
+                    .into_iter()
+                    .filter(|p| {
+                        if let Some(title) = &p.title {
+                            !seen_packages.contains(title)
+                        } else {
+                            false
+                        }
+                    })
+                    .collect();
+
+                if new_packages.is_empty() {
+                    print!(".");
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+                } else {
+                    println!(
+                        "\n{} {} new package(s) found",
+                        "|+|".bright_green(),
+                        new_packages.len().to_string().bright_yellow().bold()
+                    );
+
+                    // Analyze packages
+                    for package in &new_packages {
+                        if let Some(title) = &package.title {
+                            seen_packages.insert(title.clone());
+
+                            // Update status: queued
+                            if let Some(ref db) = database {
+                                let _ = db
+                                    .update_package_status(title, db::PackageStatus::Queued, None)
+                                    .await;
                             }
-                        })
-                        .collect();
 
-                    if !new_packages.is_empty() {
-                        println!(
-                            "\n{} {} new package(s) found",
-                            "|+|".bright_green(),
-                            new_packages.len().to_string().bright_yellow().bold()
-                        );
+                            // Run analysis
+                            match analyze_package(package, config, &heuristics, &database).await {
+                                Ok(report) => {
+                                    // Display report
+                                    use output::Formatter;
+                                    let formatter =
+                                        output::formatters::coloured_text::ColouredTextFormatter {};
+                                    let formatted = formatter.format_report(&report);
+                                    println!("{}", formatted);
 
-                        // Analyze packages
-                        for package in &new_packages {
-                            if let Some(title) = &package.title {
-                                seen_packages.insert(title.clone());
-
-                                // Update status: queued
-                                if let Some(ref db) = database {
-                                    let _ = db
-                                        .update_package_status(
-                                            title,
-                                            db::PackageStatus::Queued,
-                                            None,
-                                        )
-                                        .await;
-                                }
-
-                                // Run analysis
-                                match analyze_package(package, config, &heuristics, &database).await
-                                {
-                                    Ok(report) => {
-                                        // Display report
-                                        use output::Formatter;
-                                        let formatter = output::formatters::coloured_text::ColouredTextFormatter {};
-                                        let formatted = formatter.format_report(&report);
-                                        println!("{}", formatted);
-
-                                        // Save to database
-                                        if let Some(ref db) = database {
-                                            match db.insert_report(&report).await {
-                                                Ok(id) => {
-                                                    log::debug!(
-                                                        "Saved report to database with ID: {}",
-                                                        id
-                                                    );
-                                                    let _ = db
-                                                        .update_package_status(
-                                                            title,
-                                                            db::PackageStatus::Completed,
-                                                            None,
-                                                        )
-                                                        .await;
-                                                }
-                                                Err(e) => {
-                                                    log::warn!(
-                                                        "Failed to save report to database: {}",
-                                                        e
-                                                    );
-                                                }
+                                    // Save to database
+                                    if let Some(ref db) = database {
+                                        match db.insert_report(&report).await {
+                                            Ok(id) => {
+                                                log::debug!(
+                                                    "Saved report to database with ID: {}",
+                                                    id
+                                                );
+                                                let _ = db
+                                                    .update_package_status(
+                                                        title,
+                                                        db::PackageStatus::Completed,
+                                                        None,
+                                                    )
+                                                    .await;
+                                            }
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "Failed to save report to database: {}",
+                                                    e
+                                                );
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "{} Analysis failed for {}: {}",
-                                            "[!]".red(),
-                                            title.yellow(),
-                                            e
-                                        );
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "{} Analysis failed for {}: {}",
+                                        "[!]".red(),
+                                        title.yellow(),
+                                        e
+                                    );
 
-                                        // Mark as failed in database
-                                        if let Some(ref db) = database {
-                                            let _ = db
-                                                .update_package_status(
-                                                    title,
-                                                    db::PackageStatus::Failed,
-                                                    Some(&e.to_string()),
-                                                )
-                                                .await;
-                                        }
+                                    // Mark as failed in database
+                                    if let Some(ref db) = database {
+                                        let _ = db
+                                            .update_package_status(
+                                                title,
+                                                db::PackageStatus::Failed,
+                                                Some(&e.to_string()),
+                                            )
+                                            .await;
                                     }
                                 }
                             }
                         }
-                    } else {
-                        print!(".");
-                        use std::io::Write;
-                        std::io::stdout().flush()?;
                     }
                 }
             }
@@ -333,7 +335,7 @@ async fn watch_feed(
 }
 
 async fn analyze_package(
-    package: &feed::pypi::PythonPackage,
+    package: &PackageRef,
     config: Option<&Config>,
     heuristics: &Option<analysis::heuristics::HeuristicRules>,
     database: &Option<db::Database>,
@@ -453,7 +455,7 @@ async fn analyze_package(
 
 /// Stage 1: Heuristic Analysis
 async fn run_heuristics_stage(
-    package: &feed::pypi::PythonPackage,
+    package: &PackageRef,
     heuristics: &Option<analysis::heuristics::HeuristicRules>,
     pipeline_config: Option<&config::PipelineConfig>,
 ) -> Vec<output::HeuristicMatch> {
@@ -483,7 +485,7 @@ async fn run_heuristics_stage(
 
 /// Stage 2: Typosquat Detection
 async fn run_typosquat_stage(
-    package: &feed::pypi::PythonPackage,
+    package: &PackageRef,
     config: Option<&Config>,
     pipeline_config: Option<&config::PipelineConfig>,
 ) -> Vec<output::TypoSquatterMatch> {
@@ -497,7 +499,7 @@ async fn run_typosquat_stage(
     log::debug!("Stage 2: Starting typosquat analysis for {}", pkg_name);
 
     if let Some(cfg) = config {
-        match analysis::typosquat::find_typosquatters(vec![package.clone()], &cfg).await {
+        match analysis::typosquat::find_typosquatters(&[package.clone()], cfg).await {
             Ok(matches) => {
                 log::debug!(
                     "Stage 2: Typosquat analysis completed for {} ({} matches)",

@@ -17,6 +17,8 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub extraction: ExtractionConfig,
+    #[serde(default)]
+    pub ecosystems: crate::feed::ecosystem::EcosystemsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]

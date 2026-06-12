@@ -7,13 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ExtractionConfig;
 
-// ── Ecosystem ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ecosystem {
-    PyPI,
-    Npm,
-}
+pub use crate::feed::ecosystem::Ecosystem;
 
 // ── File classification roles ────────────────────────────────────────────
 
