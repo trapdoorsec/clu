@@ -28,7 +28,7 @@ fn build_tar_gz(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
 fn build_zip(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
     let buf = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(buf);
-    let options =
+    let options: zip::write::FileOptions<'_, ()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for (path, content) in entries {
         zip.start_file(path, options).unwrap();
@@ -336,7 +336,7 @@ fn test_zip_oversized_member_skipped() {
 fn test_zip_directory_entries_skipped() {
     let buf = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(buf);
-    let options =
+    let options: zip::write::FileOptions<'_, ()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     zip.add_directory("pkg/", options.clone()).unwrap();
@@ -605,7 +605,7 @@ fn test_zip_decompression_bomb_stopped() {
 
 #[test]
 fn test_build_source_bundle_entry_scripts_never_truncated() {
-    let config = clu::config::ExtractionConfig::default();
+    let _config = clu::config::ExtractionConfig::default();
     let big_content = "x".repeat(200);
     let contents = clu::analysis::package::PackageContents {
         files: vec![clu::analysis::package::FileEntry {

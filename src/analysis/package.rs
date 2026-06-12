@@ -907,11 +907,6 @@ mod tests {
 
     #[test]
     fn test_build_source_bundle_no_truncation_of_entry_scripts() {
-        let config = ExtractionConfig {
-            max_total_bytes: 50,
-            max_file_bytes: 2_097_152,
-            max_entries: 5000,
-        };
         let big_content = "x".repeat(100);
         let contents = PackageContents {
             files: vec![FileEntry {
@@ -930,11 +925,6 @@ mod tests {
 
     #[test]
     fn test_build_source_bundle_truncates_source_when_over_budget() {
-        let config = ExtractionConfig {
-            max_total_bytes: 30,
-            max_file_bytes: 2_097_152,
-            max_entries: 5000,
-        };
         let contents = PackageContents {
             files: vec![FileEntry {
                 relative_path: PathBuf::from("module.py"),

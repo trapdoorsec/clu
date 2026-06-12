@@ -344,12 +344,12 @@ mod tests {
         let db = test_db().await;
         let mut f1 = make_finding("dup-pkg");
         f1.sha256 = Some("sha".to_string());
-        let id1 = db.insert_finding(&f1).await.unwrap();
+        let _id1 = db.insert_finding(&f1).await.unwrap();
 
         let mut f2 = make_finding("dup-pkg");
         f2.sha256 = Some("sha".to_string());
         f2.status = FindingStatus::Triaging;
-        let id2 = db.insert_finding(&f2).await.unwrap();
+        let _id2 = db.insert_finding(&f2).await.unwrap();
 
         // Same unique key bumps status; only one row
         let all = db
