@@ -17,7 +17,7 @@ mod osm;
 use axum::{
     Router,
     http::StatusCode,
-    routing::{get, patch, post},
+    routing::{get, post},
 };
 use subtle::ConstantTimeEq;
 

@@ -30,8 +30,10 @@ pub struct FileEntry {
 
 // ── Package contents (entirely in-memory, no TempDir) ───────────────────
 
+#[allow(dead_code)]
 pub struct PackageContents {
     pub files: Vec<FileEntry>,
+    #[allow(dead_code)]
     pub ecosystem: Ecosystem,
     pub sha256: String,
 }
@@ -46,14 +48,18 @@ pub struct BundleEntry {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SourceBundle {
     pub entries: Vec<BundleEntry>,
+    #[allow(dead_code)]
     pub total_bytes: usize,
+    #[allow(dead_code)]
     pub truncated: bool,
 }
 
 // ── Extraction error ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum ExtractionError {
     EntryLimitExceeded {

@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 
+type FeedResult<'a> = Pin<Box<dyn Future<Output = Result<Vec<PackageRef>, Box<dyn std::error::Error>>> + Send + 'a>>;
+
 // ── Ecosystem ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -77,11 +79,7 @@ impl PyPIRegistry {
         Ecosystem::PyPI
     }
 
-    pub fn fetch_feed(
-        &self,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<Vec<PackageRef>, Box<dyn std::error::Error>>> + Send + '_>,
-    > {
+    pub fn fetch_feed(&self) -> FeedResult<'_> {
         let feed_url = self.feed_endpoint.clone();
         Box::pin(async move {
             let url = url::Url::parse(&feed_url)?;
@@ -104,11 +102,7 @@ impl NpmRegistry {
         Ecosystem::Npm
     }
 
-    pub fn fetch_feed(
-        &self,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<Vec<PackageRef>, Box<dyn std::error::Error>>> + Send + '_>,
-    > {
+    pub fn fetch_feed(&self) -> FeedResult<'_> {
         Box::pin(async {
             log::warn!("npm feed not yet implemented");
             Ok(Vec::new())

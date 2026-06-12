@@ -48,7 +48,8 @@ impl PackageStatus {
         }
     }
 
-    fn from_str(s: &str) -> Result<Self, String> {
+    #[allow(dead_code)]
+fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "queued" => Ok(PackageStatus::Queued),
             "heuristics" => Ok(PackageStatus::Heuristics),
@@ -64,6 +65,7 @@ impl PackageStatus {
 
 /// Query filters for retrieving analysis reports
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct QueryFilters {
     pub min_severity: Option<u8>,
     pub max_severity: Option<u8>,
@@ -286,6 +288,7 @@ impl Database {
     }
 
     /// Get a specific analysis report by package name (latest)
+    #[allow(dead_code)]
     pub async fn get_report(
         &self,
         package_name: &str,
@@ -313,6 +316,7 @@ impl Database {
     }
 
     /// Get a specific analysis report by row id
+    #[allow(dead_code)]
     pub async fn get_report_by_id(
         &self,
         id: i64,
@@ -338,6 +342,7 @@ impl Database {
     }
 
     /// Query analysis reports with filters
+    #[allow(dead_code)]
     pub async fn query_reports(
         &self,
         filters: &QueryFilters,
@@ -440,6 +445,7 @@ impl Database {
     }
 
     /// Get current status of a package
+    #[allow(dead_code)]
     pub async fn get_package_status(
         &self,
         package_name: &str,
@@ -466,6 +472,7 @@ impl Database {
     }
 
     /// Get all packages currently being processed
+    #[allow(dead_code)]
     pub async fn get_processing_packages(
         &self,
     ) -> Result<Vec<(String, PackageStatus, DateTime<Utc>)>, Box<dyn Error>> {
@@ -494,6 +501,7 @@ impl Database {
     }
 
     /// Get total count of reports matching filters
+    #[allow(dead_code)]
     pub async fn count_reports(&self, filters: &QueryFilters) -> Result<i64, Box<dyn Error>> {
         let mut query = String::from("SELECT COUNT(*) as count FROM analysis_reports WHERE 1=1");
         let mut bindings: Vec<String> = Vec::new();
@@ -535,6 +543,7 @@ impl Database {
     }
 
     /// Delete old reports (cleanup function)
+    #[allow(dead_code)]
     pub async fn delete_old_reports(&self, days: i64) -> Result<u64, Box<dyn Error>> {
         let cutoff = Utc::now() - chrono::Duration::days(days);
         let cutoff_str = cutoff.to_rfc3339();

@@ -125,12 +125,12 @@ pub async fn create_finding(
         .db
         .insert_finding(&finding)
         .await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
     let stored = state
         .db
         .get_finding(id)
         .await
-        .map_err(|e| AppError::Internal(e))?
+        .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound("finding not found after insert".into()))?;
 
     Ok(Json(FindingResponse::from(stored)))
@@ -161,7 +161,7 @@ pub async fn list_findings(
         .db
         .query_findings(&filters)
         .await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
     Ok(Json(
         findings.into_iter().map(FindingResponse::from).collect(),
@@ -183,7 +183,7 @@ pub async fn get_finding(
         .db
         .get_finding(id)
         .await
-        .map_err(|e| AppError::Internal(e))?
+        .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound(format!("finding {} not found", id)))?;
 
     Ok(Json(FindingResponse::from(finding)))
@@ -201,9 +201,9 @@ pub async fn update_finding(
     let status = body
         .status
         .as_deref()
-        .map(FindingStatus::from_str)
+        .map(|s| s.parse::<FindingStatus>())
         .transpose()
-        .map_err(|e| AppError::BadRequest(e))?;
+        .map_err(AppError::BadRequest)?;
 
     let update = FindingUpdate {
         status,
@@ -216,13 +216,13 @@ pub async fn update_finding(
         .db
         .update_finding(id, &update)
         .await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
     let finding = state
         .db
         .get_finding(id)
         .await
-        .map_err(|e| AppError::Internal(e))?
+        .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound(format!("finding {} not found after update", id)))?;
 
     Ok(Json(FindingResponse::from(finding)))
@@ -243,16 +243,15 @@ pub async fn get_finding_report(
         .db
         .get_finding(id)
         .await
-        .map_err(|e| AppError::Internal(e))?
+        .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound(format!("finding {} not found", id)))?;
 
-    // Fetch the linked analysis report if available
     let report = if let Some(report_id) = finding.report_id {
         state
             .db
             .get_report_by_id(report_id)
             .await
-            .map_err(|e| AppError::Internal(e))?
+            .map_err(AppError::Internal)?
     } else {
         None
     };

@@ -391,12 +391,12 @@ async fn analyze_package(
     };
 
     // Run GuardDog stage
-    if guarddog_enabled {
-        if let Some(db) = database {
-            let _ = db
-                .update_package_status(package_name, db::PackageStatus::GuardDog, None)
-                .await;
-        }
+    if guarddog_enabled
+        && let Some(db) = database
+    {
+        let _ = db
+            .update_package_status(package_name, db::PackageStatus::GuardDog, None)
+            .await;
     }
 
     let guarddog_result = run_guarddog_stage(package_name, &package_result, guarddog_enabled).await;
@@ -520,7 +520,7 @@ async fn run_typosquat_stage(
     log::debug!("Stage 2: Starting typosquat analysis for {}", pkg_name);
 
     if let Some(cfg) = config {
-        match analysis::typosquat::find_typosquatters(&[package.clone()], cfg).await {
+        match analysis::typosquat::find_typosquatters(std::slice::from_ref(package), cfg).await {
             Ok(matches) => {
                 log::debug!(
                     "Stage 2: Typosquat analysis completed for {} ({} matches)",

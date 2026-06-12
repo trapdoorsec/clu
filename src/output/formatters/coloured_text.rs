@@ -62,36 +62,36 @@ impl Formatter for ColouredTextFormatter {
         }
 
         // GuardDog - compact
-        if let Some(guarddog) = &report.guarddog_result {
-            if !guarddog.findings.is_empty() {
-                for finding in &guarddog.findings {
-                    findings_count += 1;
-                    let severity_icon = match finding.severity.to_lowercase().as_str() {
-                        "critical" => "🔴",
-                        "high" => "🟠",
-                        "medium" => "🟡",
-                        _ => "⚠",
-                    };
-                    output.push_str(&format!(
-                        "  {} {} - {}\n",
-                        severity_icon,
-                        finding.rule_name.bright_white(),
-                        finding.description.dimmed()
-                    ));
-                }
+        if let Some(guarddog) = &report.guarddog_result
+            && !guarddog.findings.is_empty()
+        {
+            for finding in &guarddog.findings {
+                findings_count += 1;
+                let severity_icon = match finding.severity.to_lowercase().as_str() {
+                    "critical" => "🔴",
+                    "high" => "🟠",
+                    "medium" => "🟡",
+                    _ => "⚠",
+                };
+                output.push_str(&format!(
+                    "  {} {} - {}\n",
+                    severity_icon,
+                    finding.rule_name.bright_white(),
+                    finding.description.dimmed()
+                ));
             }
         }
 
         // LLM - compact
-        if let Some(llm) = &report.llm_analysis {
-            if llm.is_malicious {
-                findings_count += 1;
-                output.push_str(&format!(
-                    "  {} LLM flagged as malicious: {}\n",
-                    "🤖".yellow(),
-                    llm.reasoning.dimmed()
-                ));
-            }
+        if let Some(llm) = &report.llm_analysis
+            && llm.is_malicious
+        {
+            findings_count += 1;
+            output.push_str(&format!(
+                "  {} LLM flagged as malicious: {}\n",
+                "🤖".yellow(),
+                llm.reasoning.dimmed()
+            ));
         }
 
         // If no findings, say so

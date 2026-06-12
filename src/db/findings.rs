@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Findings table: mutable triage state linked to immutable analysis_reports.
 //!
 //! Each finding references a report via `report_id`. The finding carries the
@@ -9,6 +10,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::error::Error;
+use std::str::FromStr;
 
 use super::Database;
 
@@ -36,8 +38,12 @@ impl FindingStatus {
             FindingStatus::Duplicate => "duplicate",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl FromStr for FindingStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "new" => Ok(FindingStatus::New),
             "triaging" => Ok(FindingStatus::Triaging),
@@ -269,7 +275,7 @@ impl Database {
 
 fn row_to_finding(row: sqlx::sqlite::SqliteRow) -> Result<Finding, Box<dyn Error>> {
     let status_str: String = row.try_get("status")?;
-    let status = FindingStatus::from_str(&status_str)?;
+    let status = status_str.parse::<FindingStatus>()?;
 
     Ok(Finding {
         id: row.try_get("id")?,
