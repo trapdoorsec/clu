@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "clu"
 path = "src/main.rs"
 
+[[bin]]
+name = "clu-api"
+path = "src/bin/clu-api.rs"
+
 [dependencies]
 clap = { version = "4.5.53", features = ["derive", "color", "cargo"] }
 tokio = { version = "1.48.0", features = ["full"] }
@@ -37,3 +41,7 @@ log = "0.4"
 env_logger = "0.11"
 zip = "0.6"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
+sha2 = "0.10"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+thiserror = "2"

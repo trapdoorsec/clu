@@ -23,6 +23,9 @@ services:
       # GuardDog downloads packages here, LLM can reuse them
       - pip-cache:/tmp/pip-cache
 
+      # Shared SQLite database volume
+      - clu-data:/home/cluuser/data
+
       # Note: Results are ephemeral - sent to external log aggregators
       # See config.toml [output] webhook for how to configure ELK/Splunk integration
       # Logs are written to stdout/stderr for docker logs and log drivers
@@ -78,6 +81,51 @@ services:
       ollama:
         condition: service_healthy
 
+  # CLU sidecar API for findings triage
+  clu-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clu-api
+    user: "1000:1000"
+    command: clu-api
+
+    volumes:
+      # Shared config
+      - ./config.toml:/home/cluuser/config/config.toml:ro
+      # Shared SQLite database (both scanner and API write here)
+      - clu-data:/home/cluuser/data
+
+    environment:
+      - RUST_LOG=info
+
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    networks:
+      - clu-network
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    depends_on:
+      - clu
+
   # Ollama LLM service
   ollama:
     image: ollama/ollama:latest
@@ -127,6 +175,10 @@ volumes:
   # Package cache (shared between GuardDog and LLM analysis)
   # Allows reusing downloaded packages across analysis stages
   pip-cache:
+    driver: local
+
+  # Shared SQLite database (scanner + API)
+  clu-data:
     driver: local
 
 # Network for inter-service communication

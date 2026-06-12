@@ -5,6 +5,8 @@
 //! - Package processing status (for live feed tracking)
 //! - Query/filtering capabilities for the web service
 
+pub mod findings;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -16,6 +18,7 @@ use std::str::FromStr;
 use crate::output::AnalysisReport;
 
 /// Database connection pool
+#[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
 }
@@ -79,7 +82,9 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
 
-        let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
+        let options = SqliteConnectOptions::from_str(database_url)?
+            .create_if_missing(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -90,6 +95,11 @@ impl Database {
 
         // Run migrations
         db.run_migrations().await?;
+
+        // Enable WAL mode for concurrent read/write access (two binaries share one DB)
+        sqlx::query("PRAGMA journal_mode=WAL")
+            .execute(&db.pool)
+            .await?;
 
         Ok(db)
     }
@@ -104,6 +114,8 @@ impl Database {
                 package_name TEXT NOT NULL,
                 package_version TEXT,
                 timestamp TEXT NOT NULL,
+                ecosystem TEXT,
+                sha256 TEXT,
                 severity INTEGER NOT NULL,
                 is_malicious INTEGER NOT NULL,
                 recommendation TEXT NOT NULL,
@@ -179,6 +191,60 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // Create findings table for sidecar API
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS findings (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_id       INTEGER REFERENCES analysis_reports(id),
+                ecosystem       TEXT NOT NULL,
+                name            TEXT NOT NULL,
+                version         TEXT,
+                sha256          TEXT,
+                first_seen      TEXT NOT NULL,
+                last_updated    TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'new',
+                severity        INTEGER NOT NULL DEFAULT 0,
+                classification  TEXT,
+                score           INTEGER NOT NULL DEFAULT 0,
+                ioc             TEXT,
+                payload_excerpt TEXT,
+                analyst_notes   TEXT,
+                reported_to     TEXT,
+                UNIQUE(ecosystem, name, version, sha256)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_finding_ecosystem
+            ON findings(ecosystem)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_finding_status
+            ON findings(status)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_finding_name
+            ON findings(name)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -186,15 +252,20 @@ impl Database {
     pub async fn insert_report(&self, report: &AnalysisReport) -> Result<i64, Box<dyn Error>> {
         let report_json = serde_json::to_string(report)?;
         let created_at = Utc::now().to_rfc3339();
+        let ecosystem_str = serde_json::to_string(&report.ecosystem)
+            .map(|s| s.trim_matches('"').to_string())
+            .unwrap_or_else(|_| "pypi".to_string());
 
         let result = sqlx::query(
             r#"
             INSERT INTO analysis_reports
-            (package_name, package_version, timestamp, severity,
+            (package_name, package_version, timestamp, ecosystem, sha256, severity,
              is_malicious, recommendation, report_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(package_name, timestamp) DO UPDATE SET
                 package_version = excluded.package_version,
+                ecosystem = excluded.ecosystem,
+                sha256 = excluded.sha256,
                 severity = excluded.severity,
                 is_malicious = excluded.is_malicious,
                 recommendation = excluded.recommendation,
@@ -204,6 +275,8 @@ impl Database {
         .bind(&report.package_name)
         .bind(&report.package_version)
         .bind(&report.timestamp)
+        .bind(&ecosystem_str)
+        .bind(&report.sha256)
         .bind(report.severity as i64)
         .bind(if report.is_malicious { 1 } else { 0 })
         .bind(&report.recommendation)
@@ -230,6 +303,31 @@ impl Database {
             "#,
         )
         .bind(package_name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            let json: String = row.try_get("report_json")?;
+            let report: AnalysisReport = serde_json::from_str(&json)?;
+            Ok(Some(report))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a specific analysis report by row id
+    pub async fn get_report_by_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<AnalysisReport>, Box<dyn Error>> {
+        let row = sqlx::query(
+            r#"
+            SELECT report_json
+            FROM analysis_reports
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -461,6 +559,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::ecosystem::Ecosystem;
     use crate::output::AnalysisReport;
 
     #[tokio::test]
@@ -477,6 +576,8 @@ mod tests {
             package_name: "test-package".to_string(),
             package_version: Some("1.0.0".to_string()),
             timestamp: Utc::now().to_rfc3339(),
+            ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
             guarddog_result: None,
@@ -509,6 +610,8 @@ mod tests {
                 package_name: format!("package-{}", i),
                 package_version: None,
                 timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -583,6 +686,8 @@ mod tests {
             package_name: "update-test".to_string(),
             package_version: Some("1.0.0".to_string()),
             timestamp: timestamp.clone(),
+            ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
             guarddog_result: None,
@@ -600,6 +705,8 @@ mod tests {
             package_name: "update-test".to_string(),
             package_version: Some("1.0.1".to_string()),
             timestamp: timestamp.clone(),
+            ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
             guarddog_result: None,
@@ -629,6 +736,8 @@ mod tests {
                 package_name: format!("pkg-{}", i),
                 package_version: None,
                 timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -672,6 +781,8 @@ mod tests {
                 package_name: format!("page-pkg-{}", i),
                 package_version: None,
                 timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -727,6 +838,8 @@ mod tests {
                 package_name: name.to_string(),
                 package_version: None,
                 timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -759,6 +872,8 @@ mod tests {
                 package_name: format!("pkg-score-{}", score),
                 package_version: None,
                 timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -793,6 +908,8 @@ mod tests {
                 package_name: format!("count-pkg-{}", i),
                 package_version: None,
                 timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -894,6 +1011,8 @@ mod tests {
                 package_name: "multi-version".to_string(),
                 package_version: Some(format!("1.0.{}", i)),
                 timestamp: (base_time + chrono::Duration::seconds(i)).to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -971,6 +1090,8 @@ mod tests {
                 package_name: name.to_string(),
                 package_version: None,
                 timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,
@@ -1008,6 +1129,8 @@ mod tests {
             package_name: "old-package".to_string(),
             package_version: None,
             timestamp: Utc::now().to_rfc3339(),
+            ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
             guarddog_result: None,
@@ -1032,6 +1155,8 @@ mod tests {
             package_name: "recent-package".to_string(),
             package_version: None,
             timestamp: Utc::now().to_rfc3339(),
+            ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
             guarddog_result: None,
@@ -1073,6 +1198,8 @@ mod tests {
                 package_name: format!("pkg-{}", i),
                 package_version: None,
                 timestamp: (base_time + chrono::Duration::seconds(i)).to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
                 guarddog_result: None,

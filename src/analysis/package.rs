@@ -6,6 +6,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::config::ExtractionConfig;
+use sha2::{Digest, Sha256};
 
 pub use crate::feed::ecosystem::Ecosystem;
 
@@ -32,6 +33,7 @@ pub struct FileEntry {
 pub struct PackageContents {
     pub files: Vec<FileEntry>,
     pub ecosystem: Ecosystem,
+    pub sha256: String,
 }
 
 // ── Source bundle for LLM / heuristics consumption ──────────────────────
@@ -144,11 +146,18 @@ fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
     Some(sanitized)
 }
 
+fn compute_sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn extract_tar_gz_in_memory(
     data: &[u8],
     config: &ExtractionConfig,
     ecosystem: Ecosystem,
 ) -> Result<PackageContents, ExtractionError> {
+    let sha256 = compute_sha256(data);
     let gz = flate2::read::GzDecoder::new(data);
     let mut archive = tar::Archive::new(gz);
 
@@ -231,7 +240,11 @@ pub fn extract_tar_gz_in_memory(
         });
     }
 
-    Ok(PackageContents { files, ecosystem })
+    Ok(PackageContents {
+        files,
+        ecosystem,
+        sha256,
+    })
 }
 
 // ── In-memory ZIP extraction (wheels / .whl) ────────────────────────────
@@ -241,6 +254,7 @@ pub fn extract_zip_in_memory(
     config: &ExtractionConfig,
     ecosystem: Ecosystem,
 ) -> Result<PackageContents, ExtractionError> {
+    let sha256 = compute_sha256(data);
     let cursor = std::io::Cursor::new(data);
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| ExtractionError::InvalidArchive(e.to_string()))?;
@@ -313,7 +327,11 @@ pub fn extract_zip_in_memory(
         });
     }
 
-    Ok(PackageContents { files, ecosystem })
+    Ok(PackageContents {
+        files,
+        ecosystem,
+        sha256,
+    })
 }
 
 // ── Ecosystem-aware file classification ──────────────────────────────────
@@ -871,6 +889,7 @@ mod tests {
                 },
             ],
             ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
         };
 
         let bundle = build_source_bundle(&contents, config.max_total_bytes);
@@ -895,6 +914,7 @@ mod tests {
                 role: FileRole::EntryScript,
             }],
             ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
         };
 
         let bundle = build_source_bundle(&contents, 50);
@@ -916,6 +936,7 @@ mod tests {
                 role: FileRole::Source,
             }],
             ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
         };
 
         let bundle = build_source_bundle(&contents, 30);

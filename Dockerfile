@@ -1,5 +1,5 @@
 # Multi-stage build for CLU malware scanner
-# Stage 1: Build Rust binary
+# Stage 1: Build Rust binaries
 FROM rust:1.83-slim-bookworm AS builder
 RUN rustup default nightly
 
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
 COPY *.toml Cargo.lock ./
 COPY src ./src
 
-# Build release binary
+# Build both release binaries
 RUN cargo build --release
 
 # Stage 2: Runtime environment
@@ -45,14 +45,12 @@ RUN python3 -m venv /home/cluuser/venv && \
 # Add venv to PATH
 ENV PATH="/home/cluuser/venv/bin:${PATH}"
 
-# Copy binary from builder
+# Copy binaries from builder
 COPY --from=builder --chown=cluuser:cluuser /build/target/release/clu /usr/local/bin/clu
+COPY --from=builder --chown=cluuser:cluuser /build/target/release/clu-api /usr/local/bin/clu-api
 
-# Create config directory (will be mounted as read-only)
-RUN mkdir -p /home/cluuser/config
-
-# Set working directory
-WORKDIR /home/cluuser/config
+# Create config and data directories
+RUN mkdir -p /home/cluuser/config /home/cluuser/data
 
 # Default command shows help
 CMD ["clu", "--help"]

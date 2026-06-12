@@ -4,17 +4,20 @@ pub use crate::analysis::guarddog::GuardDogResult;
 pub use crate::analysis::heuristics::HeuristicMatch;
 pub use crate::analysis::llm::{LlmAnalysisResult, PromptInjectionDetection};
 pub use crate::analysis::typosquat::TypoSquatterMatch;
+pub use crate::feed::ecosystem::Ecosystem;
 use serde::{Deserialize, Serialize};
 
 pub mod formatters;
 pub mod tui;
 pub mod webhook;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisReport {
     pub package_name: String,
     pub package_version: Option<String>,
     pub timestamp: String,
+    pub ecosystem: Ecosystem,
+    pub sha256: String,
 
     // Tier 1: Initial findings
     pub heuristic_matches: Vec<HeuristicMatch>,

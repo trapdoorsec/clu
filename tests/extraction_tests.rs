@@ -614,6 +614,7 @@ fn test_build_source_bundle_entry_scripts_never_truncated() {
             role: clu::analysis::package::FileRole::EntryScript,
         }],
         ecosystem: clu::analysis::package::Ecosystem::PyPI,
+        sha256: String::new(),
     };
 
     // Budget is 50, but entry scripts should never be truncated
@@ -632,6 +633,7 @@ fn test_build_source_bundle_source_files_truncated_under_budget() {
             role: clu::analysis::package::FileRole::Source,
         }],
         ecosystem: clu::analysis::package::Ecosystem::PyPI,
+        sha256: String::new(),
     };
 
     let bundle = clu::analysis::package::build_source_bundle(&contents, 50);
@@ -660,6 +662,7 @@ fn test_build_source_bundle_priority_ordering() {
             },
         ],
         ecosystem: clu::analysis::package::Ecosystem::PyPI,
+        sha256: String::new(),
     };
 
     let bundle = clu::analysis::package::build_source_bundle(&contents, 10000);

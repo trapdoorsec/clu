@@ -19,6 +19,8 @@ pub struct Config {
     pub extraction: ExtractionConfig,
     #[serde(default)]
     pub ecosystems: crate::feed::ecosystem::EcosystemsConfig,
+    #[serde(default)]
+    pub sidecar: SidecarConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -210,5 +212,40 @@ impl Config {
         let content = fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
         Ok(config)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SidecarConfig {
+    /// URL of the sidecar API to POST findings to (unset = no POST).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Shared-secret bearer token for authenticating to the sidecar.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// HTTP timeout in seconds when POSTing to the sidecar.
+    #[serde(default = "default_sidecar_timeout")]
+    pub timeout_secs: u64,
+    /// Address the clu-api binary binds to (default 127.0.0.1:8080).
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: String,
+}
+
+fn default_sidecar_timeout() -> u64 {
+    5
+}
+
+fn default_listen_addr() -> String {
+    "127.0.0.1:8080".to_string()
+}
+
+impl Default for SidecarConfig {
+    fn default() -> Self {
+        SidecarConfig {
+            endpoint: None,
+            token: None,
+            timeout_secs: default_sidecar_timeout(),
+            listen_addr: default_listen_addr(),
+        }
     }
 }

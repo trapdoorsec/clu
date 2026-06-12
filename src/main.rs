@@ -291,6 +291,20 @@ async fn watch_feed(
                                                         None,
                                                     )
                                                     .await;
+
+                                                // Sidecar: fire-and-forget POST
+                                                if let Some(cfg) = config {
+                                                    let report_clone = report.clone();
+                                                    let sidecar_cfg = cfg.sidecar.clone();
+                                                    tokio::spawn(async move {
+                                                        output::webhook::post_finding_to_sidecar(
+                                                            &report_clone,
+                                                            Some(id),
+                                                            &sidecar_cfg,
+                                                        )
+                                                        .await;
+                                                    });
+                                                }
                                             }
                                             Err(e) => {
                                                 log::warn!(
@@ -442,6 +456,11 @@ async fn analyze_package(
         package_name: package_name.to_string(),
         package_version: None,
         timestamp: Utc::now().to_rfc3339(),
+        ecosystem: package.ecosystem,
+        sha256: package_result
+            .as_ref()
+            .map(|r| r.as_ref().map(|c| c.sha256.clone()).unwrap_or_default())
+            .unwrap_or_default(),
         heuristic_matches,
         typosquat_matches,
         guarddog_result,
