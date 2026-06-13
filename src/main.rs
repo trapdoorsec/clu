@@ -30,7 +30,7 @@ mod output;
 /// # Subcommands
 /// - `init`: Interactive configuration setup (creates config.toml)
 /// - `watch`: Continuously monitor PyPI RSS feed for new packages
-/// - `scan`: Analyze a specific package (TODO: not fully implemented)
+/// - `scan`: Analyze a specific package
 ///
 /// If no subcommand is provided, only the banner is shown and the program exits.
 fn main() {

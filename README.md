@@ -1,6 +1,6 @@
-# CLU - Containerized Malware Scanner for Python Packages
+# CLU - Containerized Malware Scanner for Python and npm Packages
 
-Malicious PyPI package hunter. Monitors the PyPI feed for new packages, runs heuristic analysis and LLM-based code review, then validates with GuardDog.
+Malicious PyPI and npm package hunter. Monitors the PyPI and npm feeds for new packages, runs heuristic analysis and LLM-based code review, then validates with GuardDog.
 
 **⚠️ SECURITY NOTE**: This tool analyzes potentially malicious code. Always run inside a container as a non-root user.
 
@@ -55,7 +55,7 @@ make docker-init
 # During setup, you'll be prompted for:
 # - PyPI feed endpoint
 # - Ollama endpoint (if using LLM analysis)
-# - Webhook URL for alerts (REQUIRED - results are ephemeral)
+# - Webhook URL for alerts (optional — results are also persisted to SQLite)
 # - Which analysis stages to enable
 
 # 4. Start the service
@@ -95,9 +95,6 @@ make docker-logs
 # Watch CLU logs only
 make docker-logs-clu
 
-# Watch sidecar API logs
-make docker-logs-api
-
 # Watch Ollama logs only
 make docker-logs-ollama
 
@@ -123,7 +120,7 @@ docker-compose logs -f clu-api
 # View Ollama logs (model loading, inference)
 docker-compose logs -f ollama
 
-# Scan specific package (once implemented)
+# Scan specific package
 docker-compose exec clu clu scan requests
 
 # Check container is running
@@ -328,8 +325,9 @@ min_package_length = 4              # Skip very short package names
 
 [output]
 log_level = "info"                  # debug, info, warn, error
-enable_tui = false
-# Webhook for real-time alerts
+enable_tui = true
+# Webhook URL for the scanner to POST findings to the sidecar API
+# (optional — if set, each report is forwarded to the sidecar)
 webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 
 [pipeline]
@@ -350,7 +348,7 @@ max_entries = 5000
 
 [ecosystems]
 pypi_enabled = true
-npm_enabled = false           # Stub — not yet implemented
+npm_enabled = false           # Feed monitoring implemented; full download/analysis pending
 
 [sidecar]
 # Scanner → API POST configuration. When endpoint is set, the scanner
@@ -593,10 +591,12 @@ CLU sends analysis results to external services in real-time:
 
 ```toml
 [output]
-webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK"
+# Sidecar webhook — scanner POSTs findings here when configured
+webhook = "http://127.0.0.1:8080"
 ```
 
-Alerts are posted to Slack (or custom endpoint) when packages are detected.
+The scanner forwards findings to the sidecar API when `webhook` is configured.
+For Slack/Discord/generic alerts, use the `[notifications]` section instead.
 
 ### Sidecar API (`clu-api`)
 
@@ -621,6 +621,7 @@ docker-compose up -d clu-api
 | `GET` | `/findings/{id}` | Single finding detail |
 | `PATCH` | `/findings/{id}` | Update triage status, classification, analyst notes |
 | `GET` | `/findings/{id}/report` | OpenSourceMalware-shaped JSON export (includes linked scan evidence) |
+| `GET` | `/metrics` | Prometheus metrics exposition |
 | `GET` | `/healthz` | Liveness probe (unauthenticated) |
 
 **Authentication behavior:**
