@@ -1,6 +1,27 @@
 use crate::config::NotificationsConfig;
 use crate::output::AnalysisReport;
 
+/// Send a startup health-check ping to all configured notification channels.
+/// This lets the operator confirm that Discord/Slack/generic webhooks are reachable
+/// before the first finding is produced.
+pub async fn notify_startup(cfg: &NotificationsConfig) {
+    if !cfg.enabled {
+        return;
+    }
+
+    let message = "🟢 **CLU startup health-check** — notification channel is live.";
+
+    if let Some(ref url) = cfg.slack_webhook {
+        send_slack_raw(url, message, cfg).await;
+    }
+    if let Some(ref url) = cfg.discord_webhook {
+        send_discord_raw(url, message, cfg).await;
+    }
+    if let Some(ref url) = cfg.generic_webhook {
+        send_generic_raw(url, message, cfg).await;
+    }
+}
+
 pub async fn notify_finding(report: &AnalysisReport, cfg: &NotificationsConfig) {
     if !cfg.enabled {
         return;
@@ -133,6 +154,74 @@ async fn send_generic(url: &str, _message: &str, report: &AnalysisReport, cfg: &
         }
         Err(e) => {
             log::warn!("generic webhook failed: {}", e);
+        }
+    }
+}
+
+// ── Raw helpers for startup health-check (no report required) ───────────
+
+async fn send_slack_raw(url: &str, message: &str, cfg: &NotificationsConfig) {
+    let payload = serde_json::json!({ "text": message });
+    match reqwest::Client::new()
+        .post(url)
+        .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                log::info!("slack startup ping sent");
+            } else {
+                log::warn!("slack startup ping returned status {}", resp.status());
+            }
+        }
+        Err(e) => {
+            log::warn!("slack startup ping failed: {}", e);
+        }
+    }
+}
+
+async fn send_discord_raw(url: &str, message: &str, cfg: &NotificationsConfig) {
+    let payload = serde_json::json!({ "content": message });
+    match reqwest::Client::new()
+        .post(url)
+        .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                log::info!("discord startup ping sent");
+            } else {
+                log::warn!("discord startup ping returned status {}", resp.status());
+            }
+        }
+        Err(e) => {
+            log::warn!("discord startup ping failed: {}", e);
+        }
+    }
+}
+
+async fn send_generic_raw(url: &str, message: &str, cfg: &NotificationsConfig) {
+    let payload = serde_json::json!({ "content": message });
+    match reqwest::Client::new()
+        .post(url)
+        .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                log::info!("generic startup ping sent");
+            } else {
+                log::warn!("generic startup ping returned status {}", resp.status());
+            }
+        }
+        Err(e) => {
+            log::warn!("generic startup ping failed: {}", e);
         }
     }
 }

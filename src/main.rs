@@ -339,6 +339,11 @@ async fn watch_feed(
         None
     };
 
+    // Send startup health-check notification
+    if let Some(cfg) = &config {
+        output::notify::notify_startup(&cfg.notifications).await;
+    }
+
     let mut seen_packages: HashSet<(Ecosystem, String)> = HashSet::new();
 
     loop {
