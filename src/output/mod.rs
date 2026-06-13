@@ -8,6 +8,7 @@ pub use crate::feed::ecosystem::Ecosystem;
 use serde::{Deserialize, Serialize};
 
 pub mod formatters;
+pub mod notify;
 pub mod tui;
 pub mod webhook;
 

@@ -21,6 +21,8 @@ pub struct Config {
     pub ecosystems: crate::feed::ecosystem::EcosystemsConfig,
     #[serde(default)]
     pub sidecar: SidecarConfig,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,7 +225,6 @@ pub struct SidecarConfig {
     /// Shared-secret bearer token for authenticating to the sidecar.
     #[serde(default)]
     pub token: Option<String>,
-    /// HTTP timeout in seconds when POSTing to the sidecar.
     #[serde(default = "default_sidecar_timeout")]
     pub timeout_secs: u64,
     /// Address the clu-api binary binds to (default 127.0.0.1:8080).
@@ -246,6 +247,43 @@ impl Default for SidecarConfig {
             token: None,
             timeout_secs: default_sidecar_timeout(),
             listen_addr: default_listen_addr(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub slack_webhook: Option<String>,
+    #[serde(default)]
+    pub discord_webhook: Option<String>,
+    #[serde(default)]
+    pub generic_webhook: Option<String>,
+    #[serde(default = "default_min_severity")]
+    pub min_severity: u8,
+    #[serde(default = "default_notification_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_min_severity() -> u8 {
+    13
+}
+
+fn default_notification_timeout() -> u64 {
+    10
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        NotificationsConfig {
+            enabled: false,
+            slack_webhook: None,
+            discord_webhook: None,
+            generic_webhook: None,
+            min_severity: default_min_severity(),
+            timeout_secs: default_notification_timeout(),
         }
     }
 }

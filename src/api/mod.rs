@@ -12,6 +12,7 @@
 
 mod findings;
 mod health;
+mod metrics;
 mod osm;
 
 use axum::{
@@ -19,6 +20,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use metrics_exporter_prometheus::PrometheusHandle;
 use subtle::ConstantTimeEq;
 
 pub use self::findings::{CreateFindingRequest, FindingResponse, PatchFindingRequest};
@@ -28,14 +30,16 @@ pub struct AppState {
     pub db: crate::db::Database,
     pub token: Option<String>,
     pub listen_addr: String,
+    pub prometheus_handle: Option<PrometheusHandle>,
 }
 
 /// Build the axum router with all API routes.
-pub fn router(db: crate::db::Database, token: Option<String>, listen_addr: String) -> Router {
+pub fn router(db: crate::db::Database, token: Option<String>, listen_addr: String, prometheus_handle: Option<PrometheusHandle>) -> Router {
     let state = AppState {
         db,
         token,
         listen_addr,
+        prometheus_handle,
     };
 
     Router::new()
@@ -49,6 +53,7 @@ pub fn router(db: crate::db::Database, token: Option<String>, listen_addr: Strin
             get(findings::get_finding).patch(findings::update_finding),
         )
         .route("/findings/{id}/report", get(findings::get_finding_report))
+        .route("/metrics", get(metrics::metrics))
         .with_state(state)
 }
 

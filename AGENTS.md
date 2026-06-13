@@ -65,8 +65,15 @@ cargo run -- watch
 # Watch with custom config
 cargo run -- watch --config /path/to/config.toml
 
-# Scan specific package (TODO: not fully implemented)
-cargo run -- scan <package-name>
+# Scan specific package
+cargo run -- scan requests
+cargo run -- scan requests --pkg-version 2.31.0
+cargo run -- scan requests --format json
+cargo run -- scan requests --format text
+
+# Output format options: auto (default), color, text, json
+cargo run -- watch --format text
+cargo run -- watch --format json
 ```
 
 ### Docker (Recommended for actual use)
@@ -109,7 +116,8 @@ CLU processes packages through a configurable pipeline with four analysis stages
 - Risk scaling: distance 1 char = 90 risk, distance 2 = 75, etc.
 
 **Stage 3: GuardDog** (`src/analysis/guarddog.rs`)
-- Pattern-based code scanning via Semgrep (stub implementation)
+- Pattern-based code scanning via external `guarddog` CLI subprocess
+- Spawns `guarddog pypi scan` with 60s timeout, parses 3 JSON formats
 - Requires package download + extraction
 - Disabled by default (slow)
 
@@ -118,6 +126,7 @@ CLU processes packages through a configurable pipeline with four analysis stages
 - Requires package download + Python code extraction
 - Disabled by default (very slow)
 - Includes prompt injection detection sentinel
+- Ollama model checking in `analysis/ollama_utils.rs`
 
 ### Critical Data Structures
 
@@ -194,6 +203,7 @@ Located in `config.toml`:
 - `[extraction]` - In-memory limits (max_total_bytes, max_file_bytes, max_entries)
 - `[ecosystems]` - Per-ecosystem toggles (pypi_enabled, npm_enabled)
 - `[sidecar]` - Scanner→API wiring: endpoint, token, timeout_secs, listen_addr
+- `[notifications]` - Alert webhooks: enabled, slack_webhook, discord_webhook, generic_webhook, min_severity, timeout_secs
 
 Custom heuristic rules defined in `heuristics.toml` with format:
 ```toml
@@ -209,9 +219,9 @@ description = "Suspicious author name"
 ### Output Formatters
 
 Located in `src/output/formatters/`:
-- `coloured_text.rs` - Colorized terminal output with risk scoring visualization (fully implemented)
-- `json.rs` - JSON serialization for structured output (fully implemented)
-- `text.rs` - Plain text formatter for non-color terminals
+- `coloured_text.rs` - Colorized terminal output with risk scoring visualization
+- `json.rs` - JSON serialization for structured output
+- `text.rs` - Plain text formatter for non-color terminals / log files / CI
 
 All implement the `Formatter` trait from `src/output/mod.rs`:
 ```rust
@@ -219,6 +229,26 @@ pub trait Formatter {
     fn format_report(&self, report: &AnalysisReport) -> String;
 }
 ```
+
+Format selection via `--format <auto|color|text|json>` on both `scan` and `watch` commands.
+`auto` uses color when stdout is a TTY, plain text otherwise.
+
+### Notifications
+
+Located in `src/output/notify.rs`:
+- Severity-gated Slack/Discord/generic webhook notifications
+- Configured via `[notifications]` in `config.toml`
+- Only fires when `report.severity >= min_severity` (default 13, i.e., HIGH+)
+- Fire-and-forget async, same pattern as `webhook.rs`
+
+### Sidecar API
+
+Located in `src/api/`:
+- `mod.rs` - Router, AppState (with `PrometheusHandle`), AppError, auth helper
+- `findings.rs` - Finding CRUD handlers + DTOs, increments `clu_findings_total` metric
+- `health.rs` - `GET /healthz` liveness probe
+- `metrics.rs` - `GET /metrics` Prometheus exposition
+- `osm.rs` - OpenSourceMalware report export
 
 ### Module Map
 
@@ -240,6 +270,7 @@ src/
 │   ├── mod.rs      # Router, AppState, AppError, auth helper
 │   ├── findings.rs # Finding CRUD handlers + DTOs
 │   ├── health.rs   # GET /healthz
+│   ├── metrics.rs  # GET /metrics (Prometheus)
 │   └── osm.rs      # OpenSourceMalware report export
 ├── bin/
 │   └── clu-api.rs  # Sidecar binary: load config, open DB (WAL), serve axum
@@ -250,21 +281,22 @@ src/
 │   ├── mod.rs     # fetch_rss, serialize_packages, watch_feed
 │   ├── ecosystem.rs # Ecosystem enum, PackageRef, PyPIRegistry, NpmRegistry
 │   ├── pypi.rs    # PythonPackage struct
-│   └── npm.rs     # Stub for Phase 3
+│   └── npm.rs    # npm _changes feed client + metadata resolution
 ├── db/            # SQLite persistence (shared between scanner and API)
 │   ├── mod.rs     # Database struct, analysis_reports, package_status, WAL mode
 │   └── findings.rs # Finding, FindingStatus, FindingFilters, CRUD methods
 ├── output/        # Result formatting
 │   ├── mod.rs     # AnalysisReport (with ecosystem + sha256), Formatter trait
 │   ├── webhook.rs # Scanner → sidecar POST (fire-and-forget)
-│   ├── tui.rs     # Terminal UI (minimal)
+│   ├── notify.rs  # Slack/Discord/generic webhook notifications
+│   ├── tui.rs     # Terminal UI (stub)
 │   └── formatters/
 │       ├── mod.rs
 │       ├── coloured_text.rs
 │       ├── json.rs
 │       └── text.rs
 └── config/        # Configuration parsing
-    └── mod.rs     # Config, PipelineConfig, CacheConfig, SidecarConfig structs
+    └── mod.rs     # Config, PipelineConfig, CacheConfig, SidecarConfig, NotificationsConfig structs
 
 config/             # Runtime config files (not in version control)
 ├── config.toml
@@ -337,19 +369,23 @@ All I/O operations use Tokio (async/await). Key functions:
 Defined in `src/main.rs` using clap derive macros. Commands:
 - `init` - Calls `handle_init()` from `init.rs`
 - `watch` - Calls `handle_watch()` from `main.rs`
-- `scan <package>` - Calls `handle_scan()` (TODO)
+- `scan <package>` - Calls `handle_scan()`, supports `--pkg-version` and `--format` flags
 
 The `clu-api` binary is a separate entry point (`src/bin/clu-api.rs`) that starts the axum HTTP server.
 
 ### Sidecar API Safety
 
-**The sidecar stores and serves data only.** No endpoint triggers package acquisition, download, or analysis. The API consumes already-produced `AnalysisReport`s via POST or directly from the SQLite database.
+**The sidecar stores and serves data only.** No endpoint triggers package acquisition, download, or analysis. The API consumes already-produced `AnalysisReport`s via POST or directly from the SQLite database. The `/metrics` endpoint exposes Prometheus counters (`clu_findings_total`) for monitoring.
 
 ### Feed Parsing
 
-RSS feed parsed with `rss` crate. The `serialize_packages()` function converts RSS items to `PythonPackage` structs. Watch for:
+- **PyPI**: RSS feed parsed with `rss` crate. The `serialize_packages()` function converts RSS items to `PythonPackage` structs.
+- **npm**: Uses CouchDB `_changes` replication feed for real-time package updates, then resolves metadata from the npm registry API. Implemented in `src/feed/npm.rs`.
+
+Watch for:
 - Missing fields (wrapped in `Option<T>`)
 - Timestamp parsing from `pub_date`
+- npm cursor-based pagination (since_cursor field on NpmRegistry)
 - Link format variations
 
 ### Error Handling
@@ -360,7 +396,7 @@ Most functions return `Result<T, Box<dyn std::error::Error>>`. Errors are logged
 
 1. **GuardDog integration** - Pattern-based code scanning (disabled by default)
    - Semgrep rule integration needs completion
-   - Currently a stub - needs actual pattern matching implementation
+   - Currently spawns external `guarddog` CLI; could benefit from native Semgrep integration
 
 2. **LLM code extraction & analysis** - Semantic analysis via Ollama (disabled by default)
    - Package extraction implemented in `analysis/package.rs`
@@ -368,14 +404,10 @@ Most functions return `Result<T, Box<dyn std::error::Error>>`. Errors are logged
    - Ollama model checking in `analysis/ollama_utils.rs`
    - Additional improvements for large packages and streaming responses
 
-3. **Scan command** - CLI routing exists but handler incomplete
-   - `handle_scan()` in `src/main.rs` marked as TODO
-   - Should load config, download/analyze single package, output result
-
-4. **TUI mode** - Minimal implementation in `src/output/tui.rs`
+3. **TUI mode** - Minimal implementation in `src/output/tui.rs`
    - Config option exists (`enable_tui`)
    - Not fully built out - mostly placeholder code
 
-5. **Text formatter** - Plain text version exists but may need enhancement
-   - JSON and colored output fully implemented
-   - Plain text version in `src/output/formatters/text.rs` available
+4. **npm scope 3b+** - Download, extraction, and full analysis pipeline for npm packages
+   - Feed + metadata (scope 3a) implemented in `src/feed/npm.rs`
+   - Package download and GuardDog/LLM analysis not yet supported for npm

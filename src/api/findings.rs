@@ -96,6 +96,8 @@ pub async fn create_finding(
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or_else(|_| "pypi".to_string());
 
+    metrics::counter!("clu_findings_total", "ecosystem" => ecosystem_str.clone(), "status" => "new").increment(1);
+
     let sha256_val = if report.sha256.is_empty() {
         None
     } else {

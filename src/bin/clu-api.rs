@@ -6,6 +6,7 @@
 use clu::api::{is_loopback, router};
 use clu::config::Config;
 use clu::db::Database;
+use metrics_exporter_prometheus::PrometheusBuilder;
 
 #[tokio::main]
 async fn main() {
@@ -23,8 +24,6 @@ async fn main() {
 
     let listen_addr = config.sidecar.listen_addr.clone();
 
-    // Fail-fast: refuse to start on a non-loopback address without a token.
-    // This prevents accidentally exposing the API on a public interface.
     if config.sidecar.token.is_none() && !is_loopback(&listen_addr) {
         log::error!(
             "FATAL: No auth token configured and bind address {:?} is not loopback. \
@@ -42,7 +41,13 @@ async fn main() {
         }
     };
 
-    let app = router(db, config.sidecar.token.clone(), listen_addr.clone());
+    let prometheus_handle = PrometheusBuilder::new()
+        .install_recorder()
+        .ok();
+
+    metrics::counter!("clu_findings_total").increment(0);
+
+    let app = router(db, config.sidecar.token.clone(), listen_addr.clone(), prometheus_handle);
 
     log::info!("clu-api listening on {}", listen_addr);
     let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();

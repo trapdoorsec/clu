@@ -2,71 +2,73 @@
 
 ## Overview
 
-**CLU** (Containerized malware scanner for python packages) is a multi-tier security analysis system that monitors the PyPI feed for potentially malicious Python packages. It employs a layered approach combining fast heuristic analysis, pattern matching, and semantic analysis to detect threats.
+**CLU** (Containerized malware scanner for Python and npm packages) is a multi-tier security analysis system that monitors the PyPI and npm feeds for potentially malicious packages. It employs a layered approach combining fast heuristic analysis, similarity matching, pattern-based scanning, and semantic LLM analysis to detect threats.
 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         PyPI RSS Feed                            │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                             ▼
-                    ┌────────────────┐
-                    │  Feed Watcher  │  (watch_feed)
-                    │  RSS Consumer  │
-                    └────────┬───────┘
-                             │
-                             ▼
-                    ┌────────────────────────────────┐
-                    │   analyze_package()            │
-                    │   Main Analysis Pipeline       │
-                    └────────┬───────────────────────┘
-                             │
-        ┌────────────────────┼────────────────────┬──────────────┐
-        │                    │                    │              │
-        ▼                    ▼                    ▼              ▼
-    ┌────────┐          ┌────────┐          ┌────────┐      ┌────────┐
-    │Tier 1: │          │Tier 1: │          │Tier 2: │      │Tier 2: │
-    │Heur.   │          │Typo.   │          │Guard   │      │  LLM   │
-    │(fast)  │          │(API)   │          │(slow)  │      │(slow)  │
-    └────┬───┘          └────┬───┘          └────┬───┘      └────┬───┘
-         │                   │                    │              │
-         └───────────────────┼────────────────────┴──────────────┘
-                             │
-                             ▼
-                    ┌────────────────────┐
-                    │  Risk Aggregation  │
-                    │  & Recommendation  │
-                    └────────┬───────────┘
-                             │
-                             ▼
-                    ┌────────────────────┐
-                    │  Output Formatters │
-                    │ (JSON/Text/Colour) │
-                    └────────┬───────────┘
-                             │
-                             ▼
-                    ┌────────────────────┐
-                    │  User Output or    │
-                    │  Webhook Alert     │
-                    └────────────────────┘
+┌──────────────────────────────────┐   ┌──────────────────────────────┐
+│         PyPI RSS Feed            │   │     npm _changes Feed        │
+└───────────────┬──────────────────┘   └──────────────┬───────────────┘
+                 │                                      │
+                 └──────────────┬───────────────────────┘
+                                │
+                                ▼
+                       ┌────────────────┐
+                       │  Feed Watcher  │  (watch_feed)
+                       │  Multi-Eco     │
+                       └────────┬───────┘
+                                │
+                                ▼
+                       ┌────────────────────────────────┐
+                       │   analyze_package()            │
+                       │   Main Analysis Pipeline       │
+                       └────────┬───────────────────────┘
+                                │
+           ┌────────────────────┼────────────────────┬──────────────┐
+           │                    │                    │              │
+           ▼                    ▼                    ▼              ▼
+     ┌────────┐          ┌────────┐          ┌────────┐      ┌────────┐
+     │Tier 1: │          │Tier 1: │          │Tier 2: │      │Tier 2: │
+     │Heur.   │          │Typo.   │          │Guard   │      │  LLM   │
+     │(fast)  │          │(API)   │          │(slow)  │      │(slow)  │
+     └────┬───┘          └────┬───┘          └────┬───┘      └────┬───┘
+          │                   │                    │              │
+          └───────────────────┼────────────────────┴──────────────┘
+                              │
+                              ▼
+                     ┌────────────────────┐
+                     │  Risk Aggregation  │
+                     │  & Recommendation  │
+                     └────────┬───────────┘
+                              │
+                   ┌──────────┼──────────┐
+                   │          │          │
+                   ▼          ▼          ▼
+           ┌──────────┐ ┌──────────┐ ┌──────────────┐
+           │ Display  │ │ Sidecar  │ │ Notifications│
+           │(color/   │ │   API    │ │(Slack/Discord│
+           │text/json)│ │ + Metrics│ │  /webhook)   │
+           └──────────┘ └──────────┘ └──────────────┘
 ```
 
 ## Core Components
 
 ### 1. Feed System (`src/feed/`)
 
-**Responsibility:** Fetch and parse PyPI package feeds
+**Responsibility:** Fetch and parse package feeds from multiple ecosystems
 
 **Files:**
 - `mod.rs` - Feed orchestration, RSS parsing
+- `ecosystem.rs` - `Ecosystem` enum, `PackageRef`, `PyPIRegistry`, `NpmRegistry`, `FeedResult`
 - `pypi.rs` - PyPI package data structures
+- `npm.rs` - npm `_changes` feed client, metadata resolution, `semver_cmp`
 
 **Key Functions:**
 - `fetch_rss(url)` - Async HTTP fetch of RSS feed
 - `serialize_packages(channel)` - Parse RSS XML into package structs
-- `watch_feed()` - Main loop that polls feed at intervals
+- `watch_feed()` - Main loop that polls feed at interval
+- `NpmRegistry::fetch_feed()` - Fetches npm `_changes` feed and resolves metadatas
 
 **Data Structure:**
 ```rust
@@ -121,28 +123,18 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 **Example:** "reqeusts" → similar to "requests" (1 char away) = 90 risk
 
 #### **Stage 3: GuardDog Analysis** (`guarddog.rs`)
-- **Type:** Pattern-based code scanning
-- **Speed:** Slow (~seconds, requires package download + Semgrep)
+- **Type:** Pattern-based code scanning via external CLI
+- **Speed:** Slow (~seconds, requires package download + GuardDog CLI)
 - **Default:** Disabled
 - **Inputs:** Package source code
 - **Outputs:** Pattern matches with severity levels
 
-**Status:** Configured but incomplete (pattern matching integration needed)
-
-**Current Implementation:**
+**Implementation:**
+- Spawns `guarddog pypi scan` subprocess with 60s timeout
+- Parses 3 JSON output format variants
+- Requires external `guarddog` CLI binary installed separately
 - Package download & extraction in `analysis/package.rs` (complete)
-- Semgrep rule integration (TODO: needs pattern matching logic)
-- Risk scoring to be implemented
-
-**Planned Behavior:**
-- Downloads package from PyPI (or uses pip cache)
-- Extracts source files
-- Runs Semgrep rules to detect malicious patterns
-- Risk scoring:
-  - Critical: 30 points per match
-  - High: 20 points per match
-  - Medium: 10 points per match
-  - Low: 5 points per match
+- Reports findings with severity and description
 
 #### **Stage 4: LLM Analysis** (`llm.rs`)
 - **Type:** Semantic code analysis via LLM
@@ -151,17 +143,12 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 - **Inputs:** Extracted Python source code
 - **Outputs:** LLM verdict + confidence score + injection detection
 
-**Status:** Partially implemented
-
-**Current Implementation:**
+**Implementation:**
 - Core LLM analysis in `src/analysis/llm.rs` (complete with injection detection)
 - Package download & extraction in `analysis/package.rs` (complete)
 - Ollama health check & model management in `analysis/ollama_utils.rs` (complete)
 - Prompt injection detection sentinel (implemented)
-
-**Behavior:**
-- Downloads package from PyPI (or uses pip cache)
-- Extracts Python source code
+- Downloads package from PyPI, extracts Python source code
 - Sends code to Ollama (qwen2.5-coder model or configured alternative)
 - LLM analyzes for malicious behavior patterns
 - Detects prompt injection attempts
@@ -192,7 +179,7 @@ min_package_length = 4
 [output]
 log_level = "info"
 enable_tui = false
-webhook = "https://hooks.slack.com/..."  # For alerts
+webhook = "https://hooks.slack.com/..."  # Scanner → sidecar URL
 
 [cache]
 pip_cache_dir = "/tmp/pip-cache"  # For storing downloaded packages
@@ -202,6 +189,33 @@ heuristics = true    # Enable Stage 1 (default: true)
 typosquat = true     # Enable Stage 2 (default: true)
 guarddog = false     # Enable Stage 3 (default: false)
 llm = false          # Enable Stage 4 (default: false)
+
+[database]
+url = "sqlite:data/clu.db"
+enabled = true
+
+[extraction]
+max_total_bytes = 10_000_000
+max_file_bytes = 1_000_000
+max_entries = 500
+
+[ecosystems]
+pypi_enabled = true
+npm_enabled = true
+
+[sidecar]
+endpoint = "http://localhost:3000"
+token = ""
+timeout_secs = 10
+listen_addr = "0.0.0.0:3000"
+
+[notifications]
+enabled = false
+slack_webhook = ""
+discord_webhook = ""
+generic_webhook = ""
+min_severity = 13     # Only notify on HIGH+ severity
+timeout_secs = 10
 ```
 
 **Pipeline Config:**
@@ -211,12 +225,23 @@ llm = false          # Enable Stage 4 (default: false)
 
 ### 4. Output System (`src/output/`)
 
-**Responsibility:** Format analysis results for different audiences
+**Responsibility:** Format and deliver analysis results
 
 **Formatters:**
-- `ColouredTextFormatter` - Colorized terminal output (fully implemented)
-- `JsonFormatter` - JSON serialization (fully implemented)
-- `TextFormatter` - Plain text (stub)
+- `ColouredTextFormatter` - Colorized terminal output with risk scoring visualization
+- `JsonFormatter` - JSON serialization for structured output
+- `TextFormatter` - Plain text for non-color terminals, log files, and CI
+
+**Format Selection:** `--format auto|color|text|json` on both `scan` and `watch` commands. `auto` uses color when stdout is a TTY, plain text otherwise.
+
+**Notifications (`notify.rs`):**
+- Severity-gated Slack/Discord/generic webhook notifications
+- Configured via `[notifications]` in `config.toml`
+- Only fires when `report.severity >= min_severity` (default 13, i.e., HIGH+)
+- Fire-and-forget async, same pattern as `webhook.rs`
+
+**Sidecar Webhook (`webhook.rs`):**
+- Scanner POSTs `AnalysisReport` to sidecar when `[sidecar] endpoint` is configured
 
 **Data Structure:**
 ```rust
@@ -224,28 +249,33 @@ pub struct AnalysisReport {
     pub package_name: String,
     pub package_version: Option<String>,
     pub timestamp: String,
+    pub ecosystem: Ecosystem,     // "pypi" | "npm"
+    pub sha256: String,            // hex digest of downloaded artifact
     pub heuristic_matches: Vec<HeuristicMatch>,
     pub typosquat_matches: Vec<TypoSquatterMatch>,
     pub injection_detection: Option<PromptInjectionDetection>,
     pub llm_analysis: Option<LlmAnalysisResult>,
     pub guarddog_result: Option<GuardDogResult>,
-    pub overall_risk_score: u8,
+    pub severity: u8,    // 1-25 (impact * likelihood)
     pub is_malicious: bool,
     pub recommendation: String,  // "SAFE", "REVIEW", "BLOCK"
 }
 ```
 
-### 5. CLI System (`src/main.rs` + `src/cli.rs`)
+### 5. CLI System (`src/main.rs` + `src/cli/`)
 
 **Commands:**
 - `clu init` - Interactive configuration setup
-- `clu watch` - Monitor PyPI feed continuously
-- `clu scan <package>` - Analyze single package (TODO)
+- `clu watch` - Monitor PyPI and npm feeds continuously
+- `clu scan <package>` - Analyze single package
+  - `--pkg-version <VERSION>` - Specify package version
+  - `--format <auto|color|text|json>` - Output format
 
 **Key Functions:**
 - `handle_init()` - Configuration wizard
-- `handle_watch()` - Feed monitoring
-- `handle_scan()` - Single package analysis (unimplemented)
+- `handle_watch()` - Multi-ecosystem feed monitoring
+- `handle_scan()` - Single package analysis with full pipeline
+- `persist_and_notify()` - Shared helper: DB insert, sidecar POST, notifications
 
 ### 6. Risk Scoring System
 
@@ -306,14 +336,18 @@ risk_score = min(risk_score, 100)  // Cap at 100
    └─ Loop back to step 3
 ```
 
-### Scan Mode Flow (TODO)
+### Scan Mode Flow
 
 ```
-1. Load config
-2. Get package name from CLI
-3. Download from PyPI (or use local)
-4. Run full analysis pipeline
-5. Display results
+1. Load config.toml + heuristics.toml
+2. Open database connection
+3. Resolve package name from CLI args
+4. Build PackageRef from ecosystem config
+5. Run analyze_package() through enabled pipeline stages
+6. Format output using selected formatter (--format)
+7. Persist report to database
+8. POST to sidecar if configured
+9. Send notifications if severity threshold met
 ```
 
 ## Technology Stack
@@ -329,8 +363,12 @@ risk_score = min(risk_score, 100)  // Cap at 100
 | **Dialog** | Dialoguer | Interactive setup prompts |
 | **Distance** | Levenshtein | Typosquat similarity matching |
 | **LLM** | Ollama-rs | Ollama HTTP API client |
-| **Archive** | Tar/Flate2 | Package decompression |
+| **Archive** | Tar/Flate2, Zip | Package decompression |
 | **Utilities** | Walkdir, Regex | File traversal, pattern matching |
+| **API** | Axum | Sidecar REST API + metrics |
+| **Database** | SQLite (sqlx) | Persistence, WAL mode |
+| **Metrics** | metrics + metrics-exporter-prometheus | Prometheus exposition |
+| **Notifications** | Reqwest (fire-and-forget) | Slack/Discord/generic webhooks |
 
 ## Key Design Decisions
 
@@ -368,7 +406,7 @@ risk_score = min(risk_score, 100)  // Cap at 100
 
 ```
 src/
-├── main.rs              # CLI entry point, watch/scan command routing
+├── main.rs              # CLI entry point, handle_scan, handle_watch, persist_and_notify, get_formatter
 ├── lib.rs               # Library exports
 ├── init.rs              # Interactive config setup (dialoguer prompts)
 ├── glitch.rs            # Matrix-style banner animation
@@ -376,20 +414,33 @@ src/
 │   ├── mod.rs          # Analysis orchestration & pipeline
 │   ├── heuristics.rs   # Rule-based metadata analysis
 │   ├── typosquat.rs    # Levenshtein distance matching
-│   ├── guarddog.rs     # Pattern-based scanning
+│   ├── guarddog.rs     # External GuardDog CLI scanner
 │   ├── llm.rs          # LLM semantic analysis with injection detection
-│   ├── package.rs      # Package download & extraction utilities
+│   ├── package.rs      # Package download, in-memory extraction, sha256, source bundles
 │   └── ollama_utils.rs # Ollama model checking and management
+├── api/                # Sidecar REST API (clu-api binary)
+│   ├── mod.rs          # Router, AppState (with PrometheusHandle), AppError, auth helper
+│   ├── findings.rs     # Finding CRUD handlers + DTOs
+│   ├── health.rs       # GET /healthz
+│   ├── metrics.rs      # GET /metrics (Prometheus exposition)
+│   └── osm.rs          # OpenSourceMalware report export
+├── bin/
+│   └── clu-api.rs      # Sidecar binary: load config, open DB (WAL), serve axum
 ├── cli/
 │   ├── mod.rs          # CLI command routing
 │   └── args.rs         # Argument parsing (clap derive)
 ├── feed/
 │   ├── mod.rs          # RSS feed fetching & parsing
+│   ├── ecosystem.rs    # Ecosystem enum, PackageRef, PyPIRegistry, NpmRegistry
 │   ├── pypi.rs         # PyPI package data structures
-│   └── package.rs      # Additional package utilities
+│   └── npm.rs          # npm _changes feed client + metadata resolution
+├── db/
+│   ├── mod.rs          # Database struct, analysis_reports, package_status, WAL mode
+│   └── findings.rs     # Finding, FindingStatus, FindingFilters, CRUD methods
 ├── output/
-│   ├── mod.rs          # AnalysisReport & Formatter trait
-│   ├── webhook.rs      # Webhook integration (Slack, etc.)
+│   ├── mod.rs          # AnalysisReport (with ecosystem + sha256), Formatter trait
+│   ├── webhook.rs      # Scanner → sidecar POST (fire-and-forget)
+│   ├── notify.rs       # Slack/Discord/generic webhook notifications
 │   ├── tui.rs          # Terminal UI (minimal)
 │   └── formatters/
 │       ├── mod.rs
@@ -397,7 +448,7 @@ src/
 │       ├── json.rs            # JSON serialization
 │       └── text.rs            # Plain text formatter
 └── config/
-    └── mod.rs          # Configuration loading & structures (Config, PipelineConfig, CacheConfig)
+    └── mod.rs          # Config, PipelineConfig, CacheConfig, SidecarConfig, NotificationsConfig
 
 config/
 ├── config.toml         # Runtime configuration
@@ -409,20 +460,21 @@ config/
 
 1. **GuardDog Pattern Matching Completion**
    - Package download & extraction ✅ (done)
-   - Semgrep pattern integration (in progress)
-   - Risk score mapping (TODO)
+   - Could benefit from native Semgrep integration instead of external CLI
+   - Risk score mapping based on finding severity
 
-2. **Database Persistence**
-   - Store analysis history
-   - Track package evolution over time
+2. **npm Scope 3b+**
+   - Feed + metadata (scope 3a) ✅ (done)
+   - Package download and extraction for npm packages
+   - GuardDog/LLM analysis for npm packages
 
-3. **Web Dashboard**
-   - Real-time monitoring UI
-   - Historical trends
+3. **TUI Mode**
+   - Minimal implementation exists in `src/output/tui.rs`
+   - Not fully built out - mostly placeholder code
 
 4. **Alert System Expansion**
+   - Slack/Discord/generic webhooks ✅ (done)
    - Email notifications
-   - Custom webhooks
    - Integration with threat feeds
 
 5. **Performance Optimization**
@@ -440,10 +492,14 @@ config/
 | Component | Test Type | Status |
 |-----------|-----------|--------|
 | Heuristics | Unit tests | In `tests/injection_tests.rs` |
-| Typosquat | Unit tests | TODO |
-| RSS Parsing | Integration test | TODO |
+| LLM | Unit tests | In `tests/injection_tests.rs` (injection detection) |
+| Typosquat | Unit tests | In `src/analysis/typosquat.rs` |
+| npm Feed | Unit tests | In `src/feed/npm.rs` (deserialization, semver_cmp) |
+| Text Formatter | Unit tests | In `src/output/formatters/text.rs` |
+| JSON Formatter | Unit tests | In `src/output/formatters/json.rs` |
 | Config Loading | Unit test | TODO |
-| End-to-end | Integration test | TODO |
+| RSS Parsing | Integration test | TODO |
+| End-to-end | Integration test | Manual verification via `clu scan` |
 
 ## Security Considerations
 
@@ -466,4 +522,4 @@ config/
 
 ---
 
-*Last Updated: 2026-01-07*
+*Last Updated: 2026-06-13*

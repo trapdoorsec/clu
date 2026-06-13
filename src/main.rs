@@ -6,7 +6,8 @@ use clap::{arg, command};
 
 use crate::analysis::heuristics;
 use crate::config::Config;
-use crate::feed::ecosystem::{PackageRef, PyPIRegistry};
+use crate::feed::ecosystem::{Ecosystem, PackageRef, PyPIRegistry};
+use crate::feed::ecosystem::NpmRegistry;
 
 // modules
 mod analysis;
@@ -84,28 +85,89 @@ fn handle_unknown() {
     unimplemented!()
 }
 
-fn handle_scan(_: &ArgMatches) {
-    let _config = Config::load("config.toml");
-    let _ = heuristics::validate_heuristics_file("heuristics.toml");
-    todo!("Implement scan logic")
+fn handle_scan(args: &ArgMatches) {
+    let package_name = match args.get_one::<String>("PACKAGE") {
+        Some(name) => name.clone(),
+        None => {
+            eprintln!("Error: PACKAGE argument is required");
+            std::process::exit(1);
+        }
+    };
+    let version = args.get_one::<String>("pkg-version").cloned();
+    let format_str = args.get_one::<String>("format").map(|s| s.as_str()).unwrap_or("auto");
+
+    let config = Config::load("config.toml").ok();
+    let heuristics = match heuristics::HeuristicRules::load("heuristics.toml") {
+        Ok(h) => Some(h),
+        Err(e) => {
+            log::warn!("Failed to load heuristics: {}", e);
+            None
+        }
+    };
+
+    let package = PackageRef {
+        ecosystem: Ecosystem::PyPI,
+        name: package_name.clone(),
+        version: version.clone(),
+        title: Some(package_name.clone()),
+        description: None,
+        link: None,
+        author: None,
+        published_date: None,
+    };
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let database = if let Some(ref cfg) = config {
+            if cfg.database.enable {
+                match db::Database::new(&cfg.database.url).await {
+                    Ok(db) => Some(db),
+                    Err(e) => {
+                        eprintln!("Failed to initialize database: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match analyze_package(&package, config.as_ref(), &heuristics, &database).await {
+            Ok(report) => {
+                let formatter = get_formatter(format_str);
+                let formatted = formatter.format_report(&report);
+                println!("{}", formatted);
+
+                persist_and_notify(&report, database.as_ref(), config.as_ref()).await;
+
+                if report.is_malicious {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("Analysis failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    });
 }
 
 fn handle_watch(args: &ArgMatches) {
     use owo_colors::OwoColorize;
 
-    // Try to load config file
+    let format_str = args.get_one::<String>("format").map(|s| s.as_str()).unwrap_or("auto");
+
     let config = Config::load("config.toml").ok();
 
-    // Set PIP_CACHE_DIR from config for use by GuardDog and LLM
     if let Some(ref cfg) = config {
-        // Safety: set_var is unsafe but we're setting it once at startup before spawning analysis tasks
         unsafe {
             std::env::set_var("PIP_CACHE_DIR", &cfg.cache.pip_cache_dir);
         }
         log::debug!("Set PIP_CACHE_DIR={}", cfg.cache.pip_cache_dir);
     }
 
-    // Priority: CLI args > config.toml > hardcoded defaults
     let url = args
         .get_one::<String>("url")
         .map(|s| s.as_str())
@@ -121,12 +183,11 @@ fn handle_watch(args: &ArgMatches) {
     let poll_interval = match parse_duration(poll_interval_str) {
         Ok(duration) => duration,
         Err(e) => {
-            eprintln!("❌ Invalid poll interval '{}': {}", poll_interval_str, e);
+            eprintln!("Invalid poll interval '{}': {}", poll_interval_str, e);
             std::process::exit(1);
         }
     };
 
-    // For boolean flags, check CLI first, then config
     let check_updates = if args.get_flag("check-updates") {
         true
     } else {
@@ -136,21 +197,19 @@ fn handle_watch(args: &ArgMatches) {
             .unwrap_or(false)
     };
 
-    // Show what configuration is being used
     if config.is_some() {
         println!("{}", ".oO( Loaded configuration from config.toml )".green());
     } else {
         println!(
             "{}",
-            "ℹ No config.toml found, using defaults. Run 'clu init' to create one.".yellow()
+            "No config.toml found, using defaults. Run 'clu init' to create one.".yellow()
         );
     }
 
-    // Run the async watch function
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        if let Err(e) = watch_feed(url, poll_interval, check_updates, config.as_ref()).await {
-            eprintln!("❌ Watch failed: {}", e);
+        if let Err(e) = watch_feed(url, poll_interval, check_updates, config.as_ref(), format_str).await {
+            eprintln!("Watch failed: {}", e);
             std::process::exit(1);
         }
     });
@@ -158,7 +217,67 @@ fn handle_watch(args: &ArgMatches) {
 
 /// Check if a pipeline stage is enabled
 fn is_stage_enabled(enabled: Option<bool>) -> bool {
-    enabled.unwrap_or(true) // Default to enabled if no config
+    enabled.unwrap_or(true)
+}
+
+fn get_formatter(format_str: &str) -> Box<dyn output::Formatter> {
+    match format_str {
+        "json" => Box::new(output::formatters::json::JsonFormatter),
+        "text" => Box::new(output::formatters::text::TextFormatter {}),
+        "color" => Box::new(output::formatters::coloured_text::ColouredTextFormatter {}),
+        "auto" => {
+            if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                Box::new(output::formatters::coloured_text::ColouredTextFormatter {})
+            } else {
+                Box::new(output::formatters::text::TextFormatter {})
+            }
+        }
+        _ => Box::new(output::formatters::coloured_text::ColouredTextFormatter {}),
+    }
+}
+
+async fn persist_and_notify(
+    report: &output::AnalysisReport,
+    database: Option<&db::Database>,
+    config: Option<&Config>,
+) {
+    if let Some(db) = database {
+        let package_name = report.package_name.as_str();
+        match db.insert_report(report).await {
+            Ok(id) => {
+                log::debug!("Saved report to database with ID: {}", id);
+                let _ = db
+                    .update_package_status(package_name, db::PackageStatus::Completed, None)
+                    .await;
+
+                if let Some(cfg) = config {
+                    let report_clone = report.clone();
+                    let sidecar_cfg = cfg.sidecar.clone();
+                    tokio::spawn(async move {
+                        output::webhook::post_finding_to_sidecar(
+                            &report_clone,
+                            Some(id),
+                            &sidecar_cfg,
+                        )
+                        .await;
+                    });
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to save report to database: {}", e);
+            }
+        }
+    }
+
+    if let Some(cfg) = config
+        && cfg.notifications.enabled
+    {
+        let report_clone = report.clone();
+        let notif_cfg = cfg.notifications.clone();
+        tokio::spawn(async move {
+            output::notify::notify_finding(&report_clone, &notif_cfg).await;
+        });
+    }
 }
 
 async fn watch_feed(
@@ -166,6 +285,7 @@ async fn watch_feed(
     poll_interval: std::time::Duration,
     _check_updates: bool,
     config_opt: Option<&Config>,
+    format_str: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use owo_colors::OwoColorize;
     use std::collections::HashSet;
@@ -219,128 +339,116 @@ async fn watch_feed(
         None
     };
 
-    let mut seen_packages: HashSet<String> = HashSet::new();
-
-    // Build registry for PyPI
-    let pypi_registry = PyPIRegistry::new(
-        url,
-        config
-            .map(|c| c.feed.popular_packages_endpoint.as_str())
-            .unwrap_or("https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json"),
-    );
+    let mut seen_packages: HashSet<(Ecosystem, String)> = HashSet::new();
 
     loop {
-        match pypi_registry.fetch_feed().await {
-            Ok(packages) => {
-                let new_packages: Vec<_> = packages
-                    .into_iter()
-                    .filter(|p| {
-                        if let Some(title) = &p.title {
-                            !seen_packages.contains(title)
-                        } else {
-                            false
+        let mut all_new_packages: Vec<PackageRef> = Vec::new();
+
+        let pypi_enabled = config.map(|c| c.ecosystems.pypi_enabled).unwrap_or(true);
+        let npm_enabled = config.map(|c| c.ecosystems.npm_enabled).unwrap_or(false);
+
+        if pypi_enabled {
+            let pypi_registry = PyPIRegistry::new(
+                url,
+                config
+                    .map(|c| c.feed.popular_packages_endpoint.as_str())
+                    .unwrap_or("https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json"),
+            );
+            match pypi_registry.fetch_feed().await {
+                Ok(packages) => {
+                    let new_pkgs: Vec<_> = packages
+                        .into_iter()
+                        .filter(|p| {
+                            let key = (p.ecosystem, p.name.clone());
+                            !seen_packages.contains(&key)
+                        })
+                        .collect();
+
+                    if new_pkgs.is_empty() {
+                        print!(".");
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                    } else {
+                        for p in &new_pkgs {
+                            seen_packages.insert((p.ecosystem, p.name.clone()));
                         }
-                    })
-                    .collect();
+                        all_new_packages.extend(new_pkgs);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("\n{} PyPI feed error: {}", "[!]".yellow(), e);
+                }
+            }
+        }
 
-                if new_packages.is_empty() {
-                    print!(".");
-                    use std::io::Write;
-                    std::io::stdout().flush()?;
-                } else {
-                    println!(
-                        "\n{} {} new package(s) found",
-                        "|+|".bright_green(),
-                        new_packages.len().to_string().bright_yellow().bold()
-                    );
+        if npm_enabled {
+            let npm_registry = NpmRegistry::default();
+            match npm_registry.fetch_feed().await {
+                Ok(packages) => {
+                    let new_pkgs: Vec<_> = packages
+                        .into_iter()
+                        .filter(|p| {
+                            let key = (p.ecosystem, p.name.clone());
+                            !seen_packages.contains(&key)
+                        })
+                        .collect();
 
-                    // Analyze packages
-                    for package in &new_packages {
-                        if let Some(title) = &package.title {
-                            seen_packages.insert(title.clone());
+                    if !new_pkgs.is_empty() {
+                        for p in &new_pkgs {
+                            seen_packages.insert((p.ecosystem, p.name.clone()));
+                        }
+                        all_new_packages.extend(new_pkgs);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("\n{} npm feed error: {}", "[!]".yellow(), e);
+                }
+            }
+        }
 
-                            // Update status: queued
-                            if let Some(ref db) = database {
-                                let _ = db
-                                    .update_package_status(title, db::PackageStatus::Queued, None)
-                                    .await;
-                            }
+        if !all_new_packages.is_empty() {
+            println!(
+                "\n{} {} new package(s) found",
+                "|+|".bright_green(),
+                all_new_packages.len().to_string().bright_yellow().bold()
+            );
 
-                            // Run analysis
-                            match analyze_package(package, config, &heuristics, &database).await {
-                                Ok(report) => {
-                                    // Display report
-                                    use output::Formatter;
-                                    let formatter =
-                                        output::formatters::coloured_text::ColouredTextFormatter {};
-                                    let formatted = formatter.format_report(&report);
-                                    println!("{}", formatted);
+            for package in &all_new_packages {
+                let pkg_name = package.title.as_deref().unwrap_or(&package.name);
 
-                                    // Save to database
-                                    if let Some(ref db) = database {
-                                        match db.insert_report(&report).await {
-                                            Ok(id) => {
-                                                log::debug!(
-                                                    "Saved report to database with ID: {}",
-                                                    id
-                                                );
-                                                let _ = db
-                                                    .update_package_status(
-                                                        title,
-                                                        db::PackageStatus::Completed,
-                                                        None,
-                                                    )
-                                                    .await;
+                if let Some(ref db) = database {
+                    let _ = db
+                        .update_package_status(pkg_name, db::PackageStatus::Queued, None)
+                        .await;
+                }
 
-                                                // Sidecar: fire-and-forget POST
-                                                if let Some(cfg) = config {
-                                                    let report_clone = report.clone();
-                                                    let sidecar_cfg = cfg.sidecar.clone();
-                                                    tokio::spawn(async move {
-                                                        output::webhook::post_finding_to_sidecar(
-                                                            &report_clone,
-                                                            Some(id),
-                                                            &sidecar_cfg,
-                                                        )
-                                                        .await;
-                                                    });
-                                                }
-                                            }
-                                            Err(e) => {
-                                                log::warn!(
-                                                    "Failed to save report to database: {}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "{} Analysis failed for {}: {}",
-                                        "[!]".red(),
-                                        title.yellow(),
-                                        e
-                                    );
+                match analyze_package(package, config, &heuristics, &database).await {
+                    Ok(report) => {
+                        let formatter = get_formatter(format_str);
+                        let formatted = formatter.format_report(&report);
+                        println!("{}", formatted);
 
-                                    // Mark as failed in database
-                                    if let Some(ref db) = database {
-                                        let _ = db
-                                            .update_package_status(
-                                                title,
-                                                db::PackageStatus::Failed,
-                                                Some(&e.to_string()),
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
+                        persist_and_notify(&report, database.as_ref(), config).await;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} Analysis failed for {}: {}",
+                            "[!]".red(),
+                            pkg_name.yellow(),
+                            e
+                        );
+
+                        if let Some(ref db) = database {
+                            let _ = db
+                                .update_package_status(
+                                    pkg_name,
+                                    db::PackageStatus::Failed,
+                                    Some(&e.to_string()),
+                                )
+                                .await;
                         }
                     }
                 }
-            }
-            Err(e) => {
-                eprintln!("\n{} Failed to fetch feed: {}", "[!]".yellow(), e);
             }
         }
 
@@ -804,29 +912,43 @@ fn command_builder() -> clap::Command {
                 )
         )
         .subcommand(
-            command!("scan").about("scan a single package")
+            command!("scan").about("Scan a single package for malicious indicators")
                 .arg(
                     arg!([PACKAGE])
                         .required(true)
-                        .help("pypi package name to scan")
+                        .help("PyPI package name to scan")
                 ).arg(
-                    arg!(-v --version)
+                    arg!(-V --"pkg-version" <VERSION>)
                         .required(false)
-                        .help("pypi package version. Uses latest if not specified.")))
+                        .help("Package version (defaults to latest)")
+                ).arg(
+                    arg!(-f --format <FORMAT>)
+                        .default_value("auto")
+                        .required(false)
+                        .help("Output format: auto, color, text, json")
+                )
+        )
         .subcommand(
-            command!("watch").about("start watching the pypi feed").arg(
-                arg!(-u --"url" <URL>)
-                    .help( "Sets a different location for the package feed. Defaults to config.toml or PyPI RSS feed.", )
-                    .required(false)
-            ).arg(
-                arg!(-p --"poll-interval" <INTERVAL>)
-                    .help( "Sets a poll interval for checking the package feed. Defaults to config.toml or 30s." )
-                    .required(false)
-            ).arg(
-                arg!(-c --"check-updates")
-                    .help("Optionally check the updates feed instead of the new package feed. Defaults to config.toml.")
-                    .action(clap::ArgAction::SetTrue)
-                    .required(false))
+            command!("watch").about("Start watching the package feed for new releases")
+                .arg(
+                    arg!(-u --"url" <URL>)
+                        .help("Sets a different location for the package feed. Defaults to config.toml or PyPI RSS feed.")
+                        .required(false)
+                ).arg(
+                    arg!(-p --"poll-interval" <INTERVAL>)
+                        .help("Sets a poll interval for checking the package feed. Defaults to config.toml or 30s.")
+                        .required(false)
+                ).arg(
+                    arg!(-c --"check-updates")
+                        .help("Optionally check the updates feed instead of the new package feed.")
+                        .action(clap::ArgAction::SetTrue)
+                        .required(false)
+                ).arg(
+                    arg!(-f --format <FORMAT>)
+                        .default_value("auto")
+                        .required(false)
+                        .help("Output format: auto, color, text, json")
+                )
         )
 }
 pub const CLAP_STYLING: clap::builder::styling::Styles = clap::builder::styling::Styles::styled()

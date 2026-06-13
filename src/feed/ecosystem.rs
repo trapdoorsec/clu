@@ -103,9 +103,15 @@ impl NpmRegistry {
     }
 
     pub fn fetch_feed(&self) -> FeedResult<'_> {
-        Box::pin(async {
-            log::warn!("npm feed not yet implemented");
-            Ok(Vec::new())
+        let since = self.since_cursor.clone();
+        Box::pin(async move {
+            match crate::feed::npm::fetch_npm_changes(since.as_deref()).await {
+                Ok((packages, _last_seq)) => Ok(packages),
+                Err(e) => {
+                    log::warn!("npm feed fetch failed: {}", e);
+                    Ok(Vec::new())
+                }
+            }
         })
     }
 }

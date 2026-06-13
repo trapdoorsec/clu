@@ -45,3 +45,5 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
 sha2 = "0.10"
 axum = "0.8"
 thiserror = "2"
+metrics = "0.24.6"
+metrics-exporter-prometheus = "0.18.3"
