@@ -26,8 +26,8 @@ services:
       # Quarantine directory - suspicious packages are preserved here for investigation
       - ./quarantine:/home/cluuser/quarantine
 
-      # Shared SQLite database volume
-      - clu-data:/home/cluuser/config/data
+      # Shared SQLite database (both scanner and API write here)
+      - ./config/data:/home/cluuser/config/data
 
       # Note: Results are ephemeral - sent to external log aggregators
       # See config.toml [output] webhook for how to configure ELK/Splunk integration
@@ -84,20 +84,21 @@ services:
       ollama:
         condition: service_healthy
 
-  # CLU sidecar API for findings triage
+  # CLU sidecar API for findings triage + SPA frontend
   clu-api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: clu-api
     user: "1000:1000"
-    command: clu-api
+    command: clu-api --listen-addr 0.0.0.0:8080
 
     volumes:
       # Shared config
       - ./config.toml:/home/cluuser/config.toml:ro
       # Shared SQLite database (both scanner and API write here)
-      - clu-data:/home/cluuser/config/data
+      # Uses bind mount so existing clu.db is available
+      - ./config/data:/home/cluuser/config/data
 
     environment:
       - RUST_LOG=info
@@ -178,10 +179,6 @@ volumes:
   # Package cache (shared between GuardDog and LLM analysis)
   # Allows reusing downloaded packages across analysis stages
   pip-cache:
-    driver: local
-
-  # Shared SQLite database (scanner + API)
-  clu-data:
     driver: local
 
 # Network for inter-service communication

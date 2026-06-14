@@ -102,8 +102,6 @@ fn default_min_package_length() -> usize {
 
 #[derive(Debug, Deserialize)]
 pub struct OutputConfig {
-    #[serde(default)]
-    pub webhook: Option<String>,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_enable_tui")]

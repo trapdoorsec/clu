@@ -151,9 +151,9 @@ pub struct AnalysisReport {
     pub guarddog_result: Option<GuardDogResult>,
 
     // Summary
-    pub severity: u8,    // 1-25 (impact * likelihood)
+    pub severity: u8,    // 1-25 (risk-weighted: static_risk / 10)
     pub is_malicious: bool,
-    pub recommendation: String,     // "BLOCK", "REVIEW", "SAFE"
+    pub recommendation: String,     // "IGNORE", "INSPECT"
 }
 
 // LLM semantic analysis result (src/analysis/llm.rs)
@@ -183,12 +183,30 @@ pub struct PythonPackage {
 
 ### Risk Scoring
 
-Aggregation logic in `src/analysis/mod.rs` (`analyze_package` function):
-- Heuristic matches: scaled down (divided by 2)
-- Typosquat matches: scaled down (divided by 2)
-- Combined result capped at 100
-- Recommendations: 0-30 SAFE → 31-70 REVIEW → 71-100 BLOCK
-- `is_malicious` flag: true if risk_score >= THRESHOLD (typically 70+)
+Aggregation logic in `src/main.rs` (`analyze_package` function) and `src/analysis/mod.rs` (`compute_static_severity`):
+
+Static severity is computed from risk-score sums rather than raw finding counts. Each heuristic rule, typosquat match, and GuardDog result carries its own `risk_score` (0-100 scale). The total risk is summed across all tiers and divided by 10 to produce a 1-25 severity:
+
+```
+heuristic_risk = sum of all HeuristicMatch.risk_score
+typosquat_risk = sum of all TypoSquatterMatch.risk_score
+guarddog_risk  = GuardDogResult.risk_score
+
+static_risk  = heuristic_risk + typosquat_risk + guarddog_risk
+severity     = max(1, min(25, static_risk / 10))   if static_risk > 0, else 1
+is_malicious = static_risk >= 70
+```
+
+Key implications:
+- `missing_author` (risk_score=30) alone → severity 3 → **IGNORE** (≤4)
+- `eval_base64` (risk_score=90) alone → severity 9 → **INSPECT**
+- `dangerous_operations` (risk_score=95) alone → severity 9 → **INSPECT**
+- `missing_author` + `missing_description` (30+35=65) → severity 6 → **INSPECT**
+- typosquat distance 1 (risk_score=90) → severity 9 → **INSPECT**
+
+The LLM can escalate but NEVER de-escalate below the static floor. Final severity = `max(llm.severity, static_severity)`. Final `is_malicious` = `llm.is_malicious OR static_is_malicious`.
+
+Recommendations: severity 0-4 → "IGNORE", severity 5+ → "INSPECT"
 
 ### Key Configuration
 

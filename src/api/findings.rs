@@ -1,4 +1,4 @@
-//! Finding handlers: create, list, get, update, delete, and OSM report export.
+//! Finding handlers: create, list, get, update, delete, bulk update, and OSM report export.
 
 use axum::{
     Json,
@@ -8,6 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::{AppError, AppState, ListResponse, require_auth};
+use crate::db::audit::AuditEntry;
 use crate::db::findings::{Finding, FindingFilters, FindingStatus, FindingUpdate};
 use crate::output::AnalysisReport;
 
@@ -62,7 +63,7 @@ impl From<Finding> for FindingResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PatchFindingRequest {
     pub status: Option<String>,
     pub classification: Option<String>,
@@ -216,6 +217,12 @@ pub async fn update_finding(
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
     require_auth(auth, &state.token, &state.listen_addr)?;
 
+    let old_finding = state
+        .db
+        .get_finding(id)
+        .await
+        .map_err(AppError::Internal)?;
+
     let status = body
         .status
         .as_deref()
@@ -225,9 +232,9 @@ pub async fn update_finding(
 
     let update = FindingUpdate {
         status,
-        classification: body.classification,
-        analyst_notes: body.analyst_notes,
-        reported_to: body.reported_to,
+        classification: body.classification.clone(),
+        analyst_notes: body.analyst_notes.clone(),
+        reported_to: body.reported_to.clone(),
     };
 
     state
@@ -235,6 +242,23 @@ pub async fn update_finding(
         .update_finding(id, &update)
         .await
         .map_err(AppError::Internal)?;
+
+    let _ = state
+        .db
+        .insert_audit_entry(&AuditEntry {
+            id: 0,
+            timestamp: String::new(),
+            action: "update".to_string(),
+            entity_type: "finding".to_string(),
+            entity_id: id,
+            old_value: old_finding
+                .as_ref()
+                .map(|f| serde_json::to_string(f).unwrap_or_default()),
+            new_value: Some(serde_json::to_string(&body).unwrap_or_default()),
+            details: Some(format!("updated finding {}", id)),
+            actor: "api".to_string(),
+        })
+        .await;
 
     let finding = state
         .db
@@ -244,6 +268,74 @@ pub async fn update_finding(
         .ok_or_else(|| AppError::NotFound(format!("finding {} not found after update", id)))?;
 
     Ok(Json(FindingResponse::from(finding)))
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BulkUpdateRequest {
+    pub ids: Vec<i64>,
+    pub status: Option<String>,
+    pub classification: Option<String>,
+    pub analyst_notes: Option<String>,
+    pub reported_to: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkUpdateResponse {
+    pub updated: Vec<i64>,
+    pub failed: Vec<(i64, String)>,
+}
+
+pub async fn bulk_update_findings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BulkUpdateRequest>,
+) -> Result<Json<BulkUpdateResponse>, AppError> {
+    require_auth(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        &state.token,
+        &state.listen_addr,
+    )?;
+
+    let status = body
+        .status
+        .as_deref()
+        .map(|s| s.parse::<FindingStatus>())
+        .transpose()
+        .map_err(AppError::BadRequest)?;
+
+    let update = FindingUpdate {
+        status,
+        classification: body.classification.clone(),
+        analyst_notes: body.analyst_notes.clone(),
+        reported_to: body.reported_to.clone(),
+    };
+
+    let mut updated = Vec::new();
+    let mut failed = Vec::new();
+
+    for &id in &body.ids {
+        match state.db.update_finding(id, &update).await {
+            Ok(_) => updated.push(id),
+            Err(e) => failed.push((id, e.to_string())),
+        }
+    }
+
+    let _ = state
+        .db
+        .insert_audit_entry(&AuditEntry {
+            id: 0,
+            timestamp: String::new(),
+            action: "bulk_update".to_string(),
+            entity_type: "finding".to_string(),
+            entity_id: 0,
+            old_value: None,
+            new_value: Some(serde_json::to_string(&body).unwrap_or_default()),
+            details: Some(format!("bulk updated {} findings", updated.len())),
+            actor: "api".to_string(),
+        })
+        .await;
+
+    Ok(Json(BulkUpdateResponse { updated, failed }))
 }
 
 pub async fn delete_finding(

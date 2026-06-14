@@ -7,6 +7,7 @@
 
 pub mod findings;
 pub mod quarantine;
+pub mod audit;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -327,6 +328,52 @@ impl Database {
             r#"
             CREATE INDEX IF NOT EXISTS idx_qpkg_name
             ON quarantined_packages(package_name)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create audit_log table for analyst action tracking
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                action TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                details TEXT,
+                actor TEXT NOT NULL DEFAULT 'api'
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_audit_action
+            ON audit_log(action)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_audit_entity
+            ON audit_log(entity_type, entity_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_audit_timestamp
+            ON audit_log(timestamp DESC)
             "#,
         )
         .execute(&self.pool)

@@ -14,7 +14,6 @@ struct ConfigValues {
     pip_cache_dir: String,
     typosquat_threshold: usize,
     min_package_length: usize,
-    webhook: Option<String>,
     log_level: String,
     enable_tui: bool,
     heuristics_enabled: bool,
@@ -33,6 +32,10 @@ struct ConfigValues {
     generic_webhook: Option<String>,
     notifications_min_severity: u8,
     notifications_timeout_secs: u64,
+    sidecar_enabled: bool,
+    sidecar_listen_addr: String,
+    sidecar_token: Option<String>,
+    database_url: String,
 }
 
 pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -278,20 +281,6 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
     matrix_glitch("\n.:* Output Configuration\n", 10, use_color);
     println!("Configure how CLU outputs detection results.\n");
 
-    let enable_webhook = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Enable webhook notifications?")
-        .default(false)
-        .interact()?;
-
-    let webhook = if enable_webhook {
-        let url: String = Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Webhook URL")
-            .interact_text()?;
-        Some(url)
-    } else {
-        None
-    };
-
     let log_level_options = ["debug", "info", "warn", "error"];
     let log_level_selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Log level")
@@ -393,6 +382,50 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         10
     };
 
+    // === Sidecar API Configuration ===
+    matrix_glitch("\n.:* Sidecar API Configuration\n", 10, use_color);
+    println!("Configure the REST API for findings triage and the web frontend.\n");
+
+    let sidecar_enabled = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enable the sidecar REST API (required for web frontend)?")
+        .default(true)
+        .interact()?;
+
+    let (sidecar_listen_addr, sidecar_token) = if sidecar_enabled {
+        let listen_addr: String = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Listen address for the API server")
+            .default("0.0.0.0:8080".to_string())
+            .interact_text()?;
+
+        let set_token = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Set a Bearer token for API authentication?")
+            .default(true)
+            .interact()?;
+
+        let token = if set_token {
+            let tok: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("API Bearer token (clients must send this in the Authorization header)")
+                .default(format!("clu-{}", rand::random::<u64>().to_string()))
+                .interact_text()?;
+            Some(tok)
+        } else {
+            None
+        };
+
+        (listen_addr, token)
+    } else {
+        ("0.0.0.0:8080".to_string(), None)
+    };
+
+    // === Database Configuration ===
+    matrix_glitch("\n.:* Database Configuration\n", 10, use_color);
+    println!("Configure SQLite database for persisting scan results.\n");
+
+    let database_url: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Database URL (SQLite)")
+        .default("sqlite://config/data/clu.db".to_string())
+        .interact_text()?;
+
     // === Generate TOML ===
     let config_values = ConfigValues {
         feed_endpoint,
@@ -405,7 +438,6 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         pip_cache_dir,
         typosquat_threshold,
         min_package_length,
-        webhook,
         log_level,
         enable_tui,
         heuristics_enabled,
@@ -424,6 +456,10 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         generic_webhook,
         notifications_min_severity,
         notifications_timeout_secs,
+        sidecar_enabled,
+        sidecar_listen_addr,
+        sidecar_token,
+        database_url,
     };
 
     let config_content = generate_toml(&config_values);
@@ -449,12 +485,6 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
 }
 
 fn generate_toml(config: &ConfigValues) -> String {
-    let webhook_line = if let Some(url) = &config.webhook {
-        format!("webhook = \"{}\"", url)
-    } else {
-        "# webhook = \"https://your-webhook-url.com\"".to_string()
-    };
-
     let discord_webhook_line = if let Some(url) = &config.discord_webhook {
         format!("discord_webhook = \"{}\"", url)
     } else {
@@ -471,6 +501,12 @@ fn generate_toml(config: &ConfigValues) -> String {
         format!("generic_webhook = \"{}\"", url)
     } else {
         "# generic_webhook = \"https://example.com/webhook\"".to_string()
+    };
+
+    let sidecar_token_line = if let Some(tok) = &config.sidecar_token {
+        format!("token = \"{}\"", tok)
+    } else {
+        "# token = \"your-secret-token\"".to_string()
     };
 
     format!(
@@ -516,9 +552,6 @@ typosquat_distance_threshold = {}
 min_package_length = {}
 
 [output]
-# Webhook URL for sending alerts (optional)
-{}
-
 # Log level: debug, info, warn, error
 log_level = "{}"
 
@@ -575,6 +608,17 @@ min_severity = {}
 
 # Request timeout in seconds for webhook calls
 timeout_secs = {}
+
+[sidecar]
+# Enable the sidecar REST API server (required for web frontend)
+enabled = {}
+
+# Address the API server binds to (0.0.0.0 for Docker, 127.0.0.1 for local only)
+listen_addr = "{}"
+{}
+[database]
+# SQLite database URL for persisting scan results and findings
+url = "{}"
 "#,
         config.feed_endpoint,
         config.popular_packages_endpoint,
@@ -586,7 +630,6 @@ timeout_secs = {}
         config.pip_cache_dir,
         config.typosquat_threshold,
         config.min_package_length,
-        webhook_line,
         config.log_level,
         config.enable_tui,
         config.heuristics_enabled,
@@ -604,7 +647,11 @@ timeout_secs = {}
         slack_webhook_line,
         generic_webhook_line,
         config.notifications_min_severity,
-        config.notifications_timeout_secs
+        config.notifications_timeout_secs,
+        config.sidecar_enabled,
+        config.sidecar_listen_addr,
+        sidecar_token_line,
+        config.database_url
     )
 }
 
@@ -654,7 +701,6 @@ mod tests {
             pip_cache_dir: "/tmp/pip-cache".to_string(),
             typosquat_threshold: 2,
             min_package_length: 4,
-            webhook: Some("https://webhook.site/test".to_string()),
             log_level: "info".to_string(),
             enable_tui: true,
             heuristics_enabled: true,
@@ -673,12 +719,15 @@ mod tests {
             generic_webhook: None,
             notifications_min_severity: 13,
             notifications_timeout_secs: 10,
+            sidecar_enabled: true,
+            sidecar_listen_addr: "0.0.0.0:8080".to_string(),
+            sidecar_token: Some("clu-test-token".to_string()),
+            database_url: "sqlite://config/data/clu.db".to_string(),
         };
 
         let toml = generate_toml(&config);
 
         assert!(toml.contains("endpoint = \"https://pypi.org/rss/packages.xml\""));
-        assert!(toml.contains("webhook = \"https://webhook.site/test\""));
         assert!(toml.contains("log_level = \"info\""));
         assert!(toml.contains("heuristics = true"));
         assert!(toml.contains("typosquat = true"));
@@ -691,6 +740,11 @@ mod tests {
         assert!(toml.contains("# generic_webhook ="));
         assert!(toml.contains("min_severity = 13"));
         assert!(toml.contains("timeout_secs = 10"));
+        assert!(toml.contains("[sidecar]"));
+        assert!(toml.contains("enabled = true"));
+        assert!(toml.contains("listen_addr = \"0.0.0.0:8080\""));
+        assert!(toml.contains("token = \"clu-test-token\""));
+        assert!(toml.contains("[database]"));
     }
 
     #[test]
@@ -706,7 +760,6 @@ mod tests {
             pip_cache_dir: "/tmp/pip-cache".to_string(),
             typosquat_threshold: 2,
             min_package_length: 4,
-            webhook: None,
             log_level: "debug".to_string(),
             enable_tui: false,
             heuristics_enabled: true,
@@ -725,15 +778,14 @@ mod tests {
             generic_webhook: None,
             notifications_min_severity: 13,
             notifications_timeout_secs: 10,
+            sidecar_enabled: false,
+            sidecar_listen_addr: "127.0.0.1:8080".to_string(),
+            sidecar_token: None,
+            database_url: "sqlite://config/data/clu.db".to_string(),
         };
 
         let toml = generate_toml(&config);
 
-        assert!(toml.contains("# webhook ="));
-        let has_active_webhook = toml
-            .lines()
-            .any(|line| line.starts_with("webhook = \"") && !line.starts_with("# webhook"));
-        assert!(!has_active_webhook);
         assert!(toml.contains("check_updates = true"));
         assert!(toml.contains("enable_tui = false"));
         assert!(toml.contains("typosquat = true"));
@@ -746,6 +798,9 @@ mod tests {
         assert!(toml.contains("# generic_webhook ="));
         assert!(toml.contains("min_severity = 13"));
         assert!(toml.contains("timeout_secs = 10"));
+        assert!(toml.contains("[sidecar]"));
+        assert!(toml.contains("enabled = false"));
+        assert!(toml.contains("# token ="));
     }
 
     #[test]
@@ -761,7 +816,6 @@ mod tests {
             pip_cache_dir: "/tmp/pip-cache".to_string(),
             typosquat_threshold: 2,
             min_package_length: 4,
-            webhook: None,
             log_level: "info".to_string(),
             enable_tui: true,
             heuristics_enabled: true,
@@ -780,6 +834,10 @@ mod tests {
             generic_webhook: None,
             notifications_min_severity: 13,
             notifications_timeout_secs: 15,
+            sidecar_enabled: true,
+            sidecar_listen_addr: "0.0.0.0:8080".to_string(),
+            sidecar_token: Some("clu-dev-token".to_string()),
+            database_url: "sqlite://config/data/clu.db".to_string(),
         };
 
         let toml = generate_toml(&config);

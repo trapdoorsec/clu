@@ -1,13 +1,17 @@
-//! Quarantine handlers: list, inspect, and delete quarantined packages.
+//! Quarantine handlers: list, inspect, delete, and download archived packages.
 
 use axum::{
     Json,
+    body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
 };
 use serde::{Deserialize, Serialize};
+use tokio::fs;
 
 use crate::api::{AppError, AppState, ListResponse, require_auth};
+use crate::db::audit::AuditEntry;
 use crate::db::quarantine::QuarantineFilters;
 
 #[derive(Debug, Deserialize)]
@@ -193,7 +197,21 @@ pub async fn delete_quarantine(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound(format!("quarantined package {} not found", id)))?;
 
-    // Remove filesystem files
+    let _ = state
+        .db
+        .insert_audit_entry(&AuditEntry {
+            id: 0,
+            timestamp: String::new(),
+            action: "delete".to_string(),
+            entity_type: "quarantine".to_string(),
+            entity_id: id,
+            old_value: Some(serde_json::to_string(&qp).unwrap_or_default()),
+            new_value: None,
+            details: Some(format!("deleted quarantined package {}", qp.package_name)),
+            actor: "api".to_string(),
+        })
+        .await;
+
     let archive_path = std::path::PathBuf::from(&qp.archive_path);
     if let Some(parent) = archive_path.parent()
         && parent.exists()
@@ -208,4 +226,49 @@ pub async fn delete_quarantine(
         .map_err(AppError::Internal)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn download_archive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Response<Body>, AppError> {
+    require_auth(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        &state.token,
+        &state.listen_addr,
+    )?;
+
+    let qp = state
+        .db
+        .get_quarantined_package(id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("quarantined package {} not found", id)))?;
+
+    let archive_path = std::path::PathBuf::from(&qp.archive_path);
+    let filename = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("archive")
+        .to_string();
+
+    let data = fs::read(&archive_path)
+        .await
+        .map_err(|e| AppError::NotFound(format!("archive file not found: {}", e)))?;
+
+    let content_disposition =
+        format!("attachment; filename=\"{}\"", filename);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_DISPOSITION, content_disposition)
+        .header("x-content-type-options", "nosniff")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'",
+        )
+        .body(Body::from(data))
+        .map_err(|e| AppError::Internal(Box::new(e)))
 }

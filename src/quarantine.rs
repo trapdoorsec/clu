@@ -315,7 +315,7 @@ mod tests {
             injection_detection: None,
             llm_analysis: None,
             severity,
-            is_malicious: severity >= 70,
+            is_malicious: severity >= 15,
             recommendation: recommendation.to_string(),
         }
     }

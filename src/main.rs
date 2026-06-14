@@ -726,21 +726,16 @@ async fn analyze_package(
     // Compute static floor from non-manipulable tiers (heuristics + typosquat + GuardDog).
     // The LLM can escalate but NEVER de-escalate below this floor, because an LLM
     // evaluating attacker-controlled text is inherently injectable.
-    let static_finding_count = heuristic_matches.len()
-        + typosquat_matches.len()
-        + guarddog_result
-            .as_ref()
-            .map(|g| g.findings.len())
-            .unwrap_or(0);
+    //
+    // Severity is computed from risk_score sums rather than raw finding counts,
+    // so a single low-signal finding (e.g. missing_author at 30) doesn't inflate
+    // severity as much as a high-signal one (e.g. eval_base64 at 90).
+    let heuristic_risk: u32 = heuristic_matches.iter().map(|m| m.risk_score as u32).sum();
+    let typosquat_risk: u32 = typosquat_matches.iter().map(|m| m.risk_score as u32).sum();
+    let guarddog_risk: u32 = guarddog_result.as_ref().map(|g| g.risk_score as u32).unwrap_or(0);
 
-    let static_severity = if static_finding_count == 0 {
-        1 // NONE * NONE
-    } else if static_finding_count <= 2 {
-        6 // MEDIUM * UNLIKELY
-    } else {
-        12 // HIGH * LIKELY
-    };
-    let static_is_malicious = static_finding_count > 3;
+    let (static_severity, static_is_malicious, _static_risk) =
+        analysis::compute_static_severity(heuristic_risk, typosquat_risk, guarddog_risk);
 
     // Merge: LLM can escalate but never de-escalate below the static floor.
     // is_malicious = OR of LLM and static (either flag is definitive).

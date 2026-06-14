@@ -1,29 +1,38 @@
 #![allow(dead_code)]
 
-//! Sidecar REST API: findings triage, reports, and quarantine management.
+//! Sidecar REST API: findings triage, reports, quarantine, stats, and audit.
+//!
+//! All API routes are under the `/api/` prefix to separate them from the
+//! SPA static file serving that clu-api provides.
 //!
 //! Endpoints:
-//!   POST   /findings              — register finding (idempotent)
-//!   GET    /findings              — list/query findings
-//!   GET    /findings/{id}         — single finding detail
-//!   PATCH  /findings/{id}         — update triage status
-//!   DELETE /findings/{id}         — delete finding
-//!   GET    /findings/{id}/report  — OSM-shaped export
-//!   GET    /reports              — list/search analysis reports
-//!   GET    /reports/count        — report count for pagination
-//!   GET    /reports/{id}         — full analysis report detail
-//!   GET    /quarantine           — list quarantined packages
-//!   GET    /quarantine/{id}      — inspect quarantined package
-//!   DELETE /quarantine/{id}      — delete quarantined package
-//!   GET    /healthz              — liveness (with DB check)
-//!   GET    /metrics              — Prometheus exposition
+//!   POST   /api/findings              — register finding (idempotent)
+//!   GET    /api/findings              — list/query findings
+//!   GET    /api/findings/{id}         — single finding detail
+//!   PATCH  /api/findings/{id}         — update triage status
+//!   DELETE /api/findings/{id}         — delete finding
+//!   POST   /api/findings/bulk         — bulk update findings
+//!   GET    /api/findings/{id}/report  — OSM-shaped export
+//!   GET    /api/reports              — list/search analysis reports
+//!   GET    /api/reports/count        — report count for pagination
+//!   GET    /api/reports/{id}         — full analysis report detail
+//!   GET    /api/quarantine           — list quarantined packages
+//!   GET    /api/quarantine/{id}      — inspect quarantined package
+//!   DELETE /api/quarantine/{id}      — delete quarantined package
+//!   GET    /api/quarantine/{id}/archive — download quarantined archive
+//!   GET    /api/stats                — dashboard statistics
+//!   GET    /api/audit-log            — query audit trail
+//!   GET    /healthz                  — liveness (with DB check)
+//!   GET    /metrics                  — Prometheus exposition
 
+mod audit;
 mod findings;
 mod health;
 mod metrics;
 mod osm;
 mod quarantine;
 mod reports;
+mod stats;
 
 use axum::{
     Router,
@@ -34,7 +43,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 
-pub use self::findings::{CreateFindingRequest, FindingResponse, PatchFindingRequest};
+pub use self::findings::{BulkUpdateRequest, BulkUpdateResponse, CreateFindingRequest, FindingResponse, PatchFindingRequest};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -53,7 +62,7 @@ pub struct ListResponse<T: Serialize> {
     pub limit: i64,
 }
 
-/// Build the axum router with all API routes and CORS middleware.
+/// Build the axum router with all API routes (under /api/) and CORS middleware.
 pub fn router(
     db: crate::db::Database,
     token: Option<String>,
@@ -82,32 +91,42 @@ pub fn router(
 
     Router::new()
         .route("/healthz", get(health::healthz))
+        .route("/metrics", get(metrics::metrics))
         .route(
-            "/findings",
+            "/api/findings",
             post(findings::create_finding).get(findings::list_findings),
         )
         .route(
-            "/findings/{id}",
+            "/api/findings/bulk",
+            post(findings::bulk_update_findings),
+        )
+        .route(
+            "/api/findings/{id}",
             get(findings::get_finding)
                 .patch(findings::update_finding)
                 .delete(findings::delete_finding),
         )
-        .route("/findings/{id}/report", get(findings::get_finding_report))
+        .route("/api/findings/{id}/report", get(findings::get_finding_report))
         .route(
-            "/reports",
+            "/api/reports",
             get(reports::list_reports),
         )
-        .route("/reports/count", get(reports::report_count))
-        .route("/reports/{id}", get(reports::get_report))
+        .route("/api/reports/count", get(reports::report_count))
+        .route("/api/reports/{id}", get(reports::get_report))
         .route(
-            "/quarantine",
+            "/api/quarantine",
             get(quarantine::list_quarantine),
         )
         .route(
-            "/quarantine/{id}",
+            "/api/quarantine/{id}",
             get(quarantine::get_quarantine).delete(quarantine::delete_quarantine),
         )
-        .route("/metrics", get(metrics::metrics))
+        .route(
+            "/api/quarantine/{id}/archive",
+            get(quarantine::download_archive),
+        )
+        .route("/api/stats", get(stats::get_stats))
+        .route("/api/audit-log", get(audit::list_audit_entries))
         .with_state(state)
         .layer(cors)
 }
