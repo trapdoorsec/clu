@@ -6,6 +6,7 @@
 //! - Query/filtering capabilities for the web service
 
 pub mod findings;
+pub mod quarantine;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,13 @@ use crate::output::AnalysisReport;
 #[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
+}
+
+impl Database {
+    /// Access the underlying SQLite pool (for health checks, etc.).
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
 }
 
 /// Package processing status for live feed tracking
@@ -74,6 +82,37 @@ pub struct QueryFilters {
     pub package_name: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// Extended query filters used by the Reports API.
+#[derive(Debug, Default)]
+pub struct ReportListFilters {
+    pub package_name: Option<String>,
+    pub ecosystem: Option<String>,
+    pub min_severity: Option<u8>,
+    pub max_severity: Option<u8>,
+    pub recommendation: Option<String>,
+    pub is_malicious: Option<bool>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// A lightweight row from the analysis_reports table used for list views.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportRow {
+    pub id: i64,
+    pub package_name: String,
+    pub package_version: Option<String>,
+    pub ecosystem: Option<String>,
+    pub severity: i64,
+    pub is_malicious: bool,
+    pub recommendation: String,
+    pub sha256: Option<String>,
+    pub timestamp: String,
 }
 
 impl Database {
@@ -239,6 +278,55 @@ impl Database {
             r#"
             CREATE INDEX IF NOT EXISTS idx_finding_name
             ON findings(name)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create quarantined_packages table for quarantine tracking
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS quarantined_packages (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                package_name     TEXT NOT NULL,
+                package_version  TEXT,
+                ecosystem        TEXT NOT NULL,
+                severity         INTEGER NOT NULL,
+                recommendation   TEXT NOT NULL,
+                archive_path     TEXT NOT NULL,
+                archive_size     INTEGER,
+                metadata_path    TEXT,
+                quarantined_at   TEXT NOT NULL,
+                report_id        INTEGER REFERENCES analysis_reports(id),
+                UNIQUE(ecosystem, package_name, package_version)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_qpkg_ecosystem
+            ON quarantined_packages(ecosystem)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_qpkg_severity
+            ON quarantined_packages(severity)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_qpkg_name
+            ON quarantined_packages(package_name)
             "#,
         )
         .execute(&self.pool)
@@ -559,6 +647,148 @@ impl Database {
         .await?;
 
         Ok(result.rows_affected())
+    }
+
+    /// List analysis report rows (summaries) with extended filters.
+    pub async fn list_report_rows(
+        &self,
+        filters: &ReportListFilters,
+    ) -> Result<Vec<ReportRow>, Box<dyn Error>> {
+        let mut query = String::from(
+            "SELECT id, package_name, package_version, ecosystem, severity, \
+             is_malicious, recommendation, sha256, timestamp \
+             FROM analysis_reports WHERE 1=1",
+        );
+        let mut bindings: Vec<String> = Vec::new();
+
+        if let Some(ref name) = filters.package_name {
+            query.push_str(" AND package_name LIKE ?");
+            bindings.push(format!("%{}%", name));
+        }
+        if let Some(ref eco) = filters.ecosystem {
+            query.push_str(" AND ecosystem = ?");
+            bindings.push(eco.clone());
+        }
+        if let Some(min_sev) = filters.min_severity {
+            query.push_str(" AND severity >= ?");
+            bindings.push(min_sev.to_string());
+        }
+        if let Some(max_sev) = filters.max_severity {
+            query.push_str(" AND severity <= ?");
+            bindings.push(max_sev.to_string());
+        }
+        if let Some(ref rec) = filters.recommendation {
+            query.push_str(" AND recommendation = ?");
+            bindings.push(rec.clone());
+        }
+        if let Some(is_malicious) = filters.is_malicious {
+            query.push_str(" AND is_malicious = ?");
+            bindings.push(if is_malicious { "1" } else { "0" }.to_string());
+        }
+        if let Some(ref since) = filters.since {
+            query.push_str(" AND timestamp >= ?");
+            bindings.push(since.clone());
+        }
+        if let Some(ref until) = filters.until {
+            query.push_str(" AND timestamp <= ?");
+            bindings.push(until.clone());
+        }
+
+        let sort_col = match filters.sort.as_deref() {
+            Some("severity") => "severity",
+            Some("package_name") => "package_name",
+            _ => "timestamp",
+        };
+        let order_dir = match filters.order.as_deref() {
+            Some("asc") => "ASC",
+            _ => "DESC",
+        };
+        query.push_str(&format!(" ORDER BY {} {}", sort_col, order_dir));
+
+        if let Some(limit) = filters.limit {
+            query.push_str(&format!(" LIMIT {}", limit.min(200)));
+        } else {
+            query.push_str(" LIMIT 50");
+        }
+        if let Some(offset) = filters.offset {
+            query.push_str(&format!(" OFFSET {}", offset));
+        }
+
+        let mut sql_query = sqlx::query(&query);
+        for binding in &bindings {
+            sql_query = sql_query.bind(binding);
+        }
+
+        let rows = sql_query.fetch_all(&self.pool).await?;
+        let mut results = Vec::new();
+        for row in rows {
+            let is_malicious_int: i64 = row.try_get("is_malicious")?;
+            results.push(ReportRow {
+                id: row.try_get("id")?,
+                package_name: row.try_get("package_name")?,
+                package_version: row.try_get("package_version")?,
+                ecosystem: row.try_get("ecosystem")?,
+                severity: row.try_get("severity")?,
+                is_malicious: is_malicious_int != 0,
+                recommendation: row.try_get("recommendation")?,
+                sha256: row.try_get("sha256")?,
+                timestamp: row.try_get("timestamp")?,
+            });
+        }
+        Ok(results)
+    }
+
+    /// Count analysis reports matching extended filters.
+    pub async fn count_report_rows(
+        &self,
+        filters: &ReportListFilters,
+    ) -> Result<i64, Box<dyn Error>> {
+        let mut query = String::from(
+            "SELECT COUNT(*) as count FROM analysis_reports WHERE 1=1",
+        );
+        let mut bindings: Vec<String> = Vec::new();
+
+        if let Some(ref name) = filters.package_name {
+            query.push_str(" AND package_name LIKE ?");
+            bindings.push(format!("%{}%", name));
+        }
+        if let Some(ref eco) = filters.ecosystem {
+            query.push_str(" AND ecosystem = ?");
+            bindings.push(eco.clone());
+        }
+        if let Some(min_sev) = filters.min_severity {
+            query.push_str(" AND severity >= ?");
+            bindings.push(min_sev.to_string());
+        }
+        if let Some(max_sev) = filters.max_severity {
+            query.push_str(" AND severity <= ?");
+            bindings.push(max_sev.to_string());
+        }
+        if let Some(ref rec) = filters.recommendation {
+            query.push_str(" AND recommendation = ?");
+            bindings.push(rec.clone());
+        }
+        if let Some(is_malicious) = filters.is_malicious {
+            query.push_str(" AND is_malicious = ?");
+            bindings.push(if is_malicious { "1" } else { "0" }.to_string());
+        }
+        if let Some(ref since) = filters.since {
+            query.push_str(" AND timestamp >= ?");
+            bindings.push(since.clone());
+        }
+        if let Some(ref until) = filters.until {
+            query.push_str(" AND timestamp <= ?");
+            bindings.push(until.clone());
+        }
+
+        let mut sql_query = sqlx::query(&query);
+        for b in &bindings {
+            sql_query = sql_query.bind(b);
+        }
+
+        let row = sql_query.fetch_one(&self.pool).await?;
+        let count: i64 = row.try_get("count")?;
+        Ok(count)
     }
 }
 
@@ -1249,5 +1479,203 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(status, PackageStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_list_report_rows_defaults() {
+        let db = Database::new("sqlite::memory:").await.unwrap();
+
+        for i in 0..5 {
+            let report = AnalysisReport {
+                package_name: format!("row-pkg-{}", i),
+                package_version: Some(format!("1.{}.0", i)),
+                timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: format!("sha256_{}", i),
+                heuristic_matches: vec![],
+                typosquat_matches: vec![],
+                guarddog_result: None,
+                injection_detection: None,
+                llm_analysis: None,
+                severity: (i as u8) * 5,
+                is_malicious: i >= 3,
+                recommendation: if i >= 3 { "BLOCK" } else { "SAFE" }.to_string(),
+            };
+            db.insert_report(&report).await.unwrap();
+        }
+
+        let filters = ReportListFilters {
+            limit: Some(50),
+            offset: Some(0),
+            ..Default::default()
+        };
+        let rows = db.list_report_rows(&filters).await.unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].package_name, "row-pkg-4");
+        assert!(rows[0].is_malicious);
+    }
+
+    #[tokio::test]
+    async fn test_list_report_rows_by_ecosystem() {
+        let db = Database::new("sqlite::memory:").await.unwrap();
+
+        let pypi_report = AnalysisReport {
+            package_name: "pypi-pkg".to_string(),
+            package_version: None,
+            timestamp: Utc::now().to_rfc3339(),
+            ecosystem: Ecosystem::PyPI,
+            sha256: String::new(),
+            heuristic_matches: vec![],
+            typosquat_matches: vec![],
+            guarddog_result: None,
+            injection_detection: None,
+            llm_analysis: None,
+            severity: 10,
+            is_malicious: false,
+            recommendation: "REVIEW".to_string(),
+        };
+
+        let npm_report = AnalysisReport {
+            package_name: "npm-pkg".to_string(),
+            package_version: None,
+            timestamp: Utc::now().to_rfc3339(),
+            ecosystem: Ecosystem::Npm,
+            sha256: String::new(),
+            heuristic_matches: vec![],
+            typosquat_matches: vec![],
+            guarddog_result: None,
+            injection_detection: None,
+            llm_analysis: None,
+            severity: 15,
+            is_malicious: true,
+            recommendation: "BLOCK".to_string(),
+        };
+
+        db.insert_report(&pypi_report).await.unwrap();
+        db.insert_report(&npm_report).await.unwrap();
+
+        let pypi_rows = db
+            .list_report_rows(&ReportListFilters {
+                ecosystem: Some("pypi".to_string()),
+                limit: Some(50),
+                offset: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(pypi_rows.len(), 1);
+        assert_eq!(pypi_rows[0].package_name, "pypi-pkg");
+
+        let npm_rows = db
+            .list_report_rows(&ReportListFilters {
+                ecosystem: Some("npm".to_string()),
+                limit: Some(50),
+                offset: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(npm_rows.len(), 1);
+        assert_eq!(npm_rows[0].package_name, "npm-pkg");
+    }
+
+    #[tokio::test]
+    async fn test_count_report_rows() {
+        let db = Database::new("sqlite::memory:").await.unwrap();
+
+        for i in 0..8 {
+            let report = AnalysisReport {
+                package_name: format!("count-row-{}", i),
+                package_version: None,
+                timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
+                heuristic_matches: vec![],
+                typosquat_matches: vec![],
+                guarddog_result: None,
+                injection_detection: None,
+                llm_analysis: None,
+                severity: if i < 4 { 5 } else { 20 },
+                is_malicious: i >= 4,
+                recommendation: if i >= 4 { "BLOCK" } else { "SAFE" }.to_string(),
+            };
+            db.insert_report(&report).await.unwrap();
+        }
+
+        let total = db
+            .count_report_rows(&ReportListFilters::default())
+            .await
+            .unwrap();
+        assert_eq!(total, 8);
+
+        let high_severity = db
+            .count_report_rows(&ReportListFilters {
+                min_severity: Some(15),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(high_severity, 4);
+
+        let malicious = db
+            .count_report_rows(&ReportListFilters {
+                is_malicious: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(malicious, 4);
+    }
+
+    #[tokio::test]
+    async fn test_list_report_rows_with_sort_and_pagination() {
+        let db = Database::new("sqlite::memory:").await.unwrap();
+
+        for i in 0..6 {
+            let report = AnalysisReport {
+                package_name: format!("sort-pkg-{}", i),
+                package_version: None,
+                timestamp: Utc::now().to_rfc3339(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: String::new(),
+                heuristic_matches: vec![],
+                typosquat_matches: vec![],
+                guarddog_result: None,
+                injection_detection: None,
+                llm_analysis: None,
+                severity: (i as u8) * 5,
+                is_malicious: false,
+                recommendation: "SAFE".to_string(),
+            };
+            db.insert_report(&report).await.unwrap();
+        }
+
+        let page1 = db
+            .list_report_rows(&ReportListFilters {
+                limit: Some(3),
+                offset: Some(0),
+                sort: Some("severity".to_string()),
+                order: Some("asc".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1[0].severity, 0);
+        assert_eq!(page1[1].severity, 5);
+        assert_eq!(page1[2].severity, 10);
+
+        let page2 = db
+            .list_report_rows(&ReportListFilters {
+                limit: Some(3),
+                offset: Some(3),
+                sort: Some("severity".to_string()),
+                order: Some("asc".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 3);
+        assert_eq!(page2[0].severity, 15);
     }
 }

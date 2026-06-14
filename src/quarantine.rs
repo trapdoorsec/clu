@@ -9,6 +9,8 @@ use crate::config::QuarantineConfig;
 use crate::feed::ecosystem::Ecosystem;
 use crate::output::AnalysisReport;
 
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
 #[allow(dead_code)]
 pub struct QuarantineResult {
     pub path: PathBuf,
@@ -62,7 +64,7 @@ pub async fn quarantine_package(
     url: &str,
     report: &AnalysisReport,
     cfg: &QuarantineConfig,
-) -> Result<QuarantineResult, Box<dyn std::error::Error>> {
+) -> Result<QuarantineResult, BoxError> {
     let quarantine_root = PathBuf::from(&cfg.directory);
     let eco_dir = quarantine_root.join(ecosystem_dir_name(ecosystem));
     let safe_name = sanitize_name(name);
@@ -127,7 +129,7 @@ fn append_audit_log(
     name: &str,
     ecosystem: Ecosystem,
     report: &AnalysisReport,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let log_path = quarantine_root.join("quarantine.log");
     let severity_label = match report.severity {
         1..=4 => "LOW",
@@ -155,7 +157,7 @@ fn append_audit_log(
 fn evict_if_needed(
     quarantine_root: &std::path::Path,
     cfg: &QuarantineConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     evict_expired(quarantine_root, cfg)?;
     evict_over_budget(quarantine_root, cfg)?;
     Ok(())
@@ -164,7 +166,7 @@ fn evict_if_needed(
 fn evict_expired(
     quarantine_root: &std::path::Path,
     cfg: &QuarantineConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     if cfg.max_age_days == 0 {
         return Ok(());
     }
@@ -211,7 +213,7 @@ fn evict_expired(
 fn evict_over_budget(
     quarantine_root: &std::path::Path,
     cfg: &QuarantineConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     if cfg.max_disk_mb == 0 {
         return Ok(());
     }
@@ -290,7 +292,7 @@ pub async fn download_and_quarantine(
     ecosystem: Ecosystem,
     report: &AnalysisReport,
     cfg: &QuarantineConfig,
-) -> Result<QuarantineResult, Box<dyn std::error::Error>> {
+) -> Result<QuarantineResult, BoxError> {
     let (raw_data, url) = crate::analysis::package::download_package(name, version).await?;
     quarantine_package(name, version, ecosystem, &raw_data, &url, report, cfg).await
 }

@@ -1,19 +1,29 @@
 #![allow(dead_code)]
 
-//! Sidecar REST API: findings triage service.
+//! Sidecar REST API: findings triage, reports, and quarantine management.
 //!
 //! Endpoints:
-//!   POST   /findings              — register (idempotent)
-//!   GET    /findings              — list/query
-//!   GET    /findings/{id}         — detail
+//!   POST   /findings              — register finding (idempotent)
+//!   GET    /findings              — list/query findings
+//!   GET    /findings/{id}         — single finding detail
 //!   PATCH  /findings/{id}         — update triage status
+//!   DELETE /findings/{id}         — delete finding
 //!   GET    /findings/{id}/report  — OSM-shaped export
-//!   GET    /healthz               — liveness
+//!   GET    /reports              — list/search analysis reports
+//!   GET    /reports/count        — report count for pagination
+//!   GET    /reports/{id}         — full analysis report detail
+//!   GET    /quarantine           — list quarantined packages
+//!   GET    /quarantine/{id}      — inspect quarantined package
+//!   DELETE /quarantine/{id}      — delete quarantined package
+//!   GET    /healthz              — liveness (with DB check)
+//!   GET    /metrics              — Prometheus exposition
 
 mod findings;
 mod health;
 mod metrics;
 mod osm;
+mod quarantine;
+mod reports;
 
 use axum::{
     Router,
@@ -21,6 +31,7 @@ use axum::{
     routing::{get, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
+use serde::Serialize;
 use subtle::ConstantTimeEq;
 
 pub use self::findings::{CreateFindingRequest, FindingResponse, PatchFindingRequest};
@@ -33,19 +44,41 @@ pub struct AppState {
     pub prometheus_handle: Option<PrometheusHandle>,
 }
 
-/// Build the axum router with all API routes.
+/// Paginated list response envelope.
+#[derive(Debug, Serialize)]
+pub struct ListResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub total: i64,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+/// Build the axum router with all API routes and CORS middleware.
 pub fn router(
     db: crate::db::Database,
     token: Option<String>,
     listen_addr: String,
     prometheus_handle: Option<PrometheusHandle>,
 ) -> Router {
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+
     let state = AppState {
         db,
         token,
         listen_addr,
         prometheus_handle,
     };
+
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers(tower_http::cors::Any);
 
     Router::new()
         .route("/healthz", get(health::healthz))
@@ -55,11 +88,28 @@ pub fn router(
         )
         .route(
             "/findings/{id}",
-            get(findings::get_finding).patch(findings::update_finding),
+            get(findings::get_finding)
+                .patch(findings::update_finding)
+                .delete(findings::delete_finding),
         )
         .route("/findings/{id}/report", get(findings::get_finding_report))
+        .route(
+            "/reports",
+            get(reports::list_reports),
+        )
+        .route("/reports/count", get(reports::report_count))
+        .route("/reports/{id}", get(reports::get_report))
+        .route(
+            "/quarantine",
+            get(quarantine::list_quarantine),
+        )
+        .route(
+            "/quarantine/{id}",
+            get(quarantine::get_quarantine).delete(quarantine::delete_quarantine),
+        )
         .route("/metrics", get(metrics::metrics))
         .with_state(state)
+        .layer(cors)
 }
 
 #[derive(Debug, thiserror::Error)]

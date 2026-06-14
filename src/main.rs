@@ -263,11 +263,14 @@ async fn persist_and_notify(
     config: Option<&Config>,
     quarantine_payload: Option<quarantine::QuarantinePayload>,
 ) {
+    let mut report_id: Option<i64> = None;
+
     if let Some(db) = database {
         let package_name = report.package_name.as_str();
         match db.insert_report(report).await {
             Ok(id) => {
                 log::debug!("Saved report to database with ID: {}", id);
+                report_id = Some(id);
                 let _ = db
                     .update_package_status(package_name, db::PackageStatus::Completed, None)
                     .await;
@@ -305,13 +308,19 @@ async fn persist_and_notify(
         && cfg.quarantine.enabled
         && report.severity >= cfg.quarantine.min_severity
     {
+        let db_clone = database.cloned();
+        let q_report_id = report_id;
         if let Some(payload) = quarantine_payload {
             let report_clone = report.clone();
             let qcfg = cfg.quarantine.clone();
             let payload_clone = payload.clone();
             let pkg_name = payload_clone.package_name.clone();
+            let ecosystem_dir = match payload_clone.ecosystem {
+                feed::ecosystem::Ecosystem::PyPI => "pypi",
+                feed::ecosystem::Ecosystem::Npm => "npm",
+            };
             tokio::spawn(async move {
-                if let Err(e) = quarantine::quarantine_package(
+                let q_result = quarantine::quarantine_package(
                     &payload_clone.package_name,
                     payload_clone.package_version.as_deref(),
                     payload_clone.ecosystem,
@@ -320,9 +329,37 @@ async fn persist_and_notify(
                     &report_clone,
                     &qcfg,
                 )
-                .await
-                {
-                    log::warn!("quarantine failed for {}: {}", pkg_name, e);
+                .await;
+                let Ok(result) = q_result else {
+                    log::warn!("quarantine failed for {}", pkg_name);
+                    return;
+                };
+                let archive_path = result.archive_file.to_string_lossy().into_owned();
+                let metadata_path = result
+                    .metadata_file
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned());
+                let archive_size = std::fs::metadata(&result.archive_file)
+                    .ok()
+                    .map(|m| m.len() as i64);
+                drop(result);
+                if let Some(db) = db_clone {
+                    let qp = db::quarantine::QuarantinedPackage {
+                        id: 0,
+                        package_name: payload_clone.package_name.clone(),
+                        package_version: payload_clone.package_version.clone(),
+                        ecosystem: ecosystem_dir.to_string(),
+                        severity: report_clone.severity as i64,
+                        recommendation: report_clone.recommendation.clone(),
+                        archive_path,
+                        archive_size,
+                        metadata_path,
+                        quarantined_at: String::new(),
+                        report_id: q_report_id,
+                    };
+                    if let Err(e) = db.insert_quarantined_package(&qp).await {
+                        log::warn!("failed to record quarantine in DB for {}: {}", pkg_name, e);
+                    }
                 }
             });
         } else {
@@ -331,6 +368,10 @@ async fn persist_and_notify(
             let pkg_name = report.package_name.clone();
             let pkg_version = report.package_version.clone();
             let ecosystem = report.ecosystem;
+            let ecosystem_dir = match ecosystem {
+                feed::ecosystem::Ecosystem::PyPI => "pypi",
+                feed::ecosystem::Ecosystem::Npm => "npm",
+            };
             tokio::spawn(async move {
                 let download_result =
                     crate::analysis::package::download_package(&pkg_name, pkg_version.as_deref())
@@ -342,7 +383,7 @@ async fn persist_and_notify(
                         return;
                     }
                 };
-                if let Err(e) = quarantine::quarantine_package(
+                let q_result = quarantine::quarantine_package(
                     &pkg_name,
                     pkg_version.as_deref(),
                     ecosystem,
@@ -351,9 +392,37 @@ async fn persist_and_notify(
                     &report_clone,
                     &qcfg,
                 )
-                .await
-                {
-                    log::warn!("quarantine failed for {}: {}", pkg_name, e);
+                .await;
+                let Ok(result) = q_result else {
+                    log::warn!("quarantine failed for {}", pkg_name);
+                    return;
+                };
+                let archive_path = result.archive_file.to_string_lossy().into_owned();
+                let metadata_path = result
+                    .metadata_file
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned());
+                let archive_size = std::fs::metadata(&result.archive_file)
+                    .ok()
+                    .map(|m| m.len() as i64);
+                drop(result);
+                if let Some(db) = db_clone {
+                    let qp = db::quarantine::QuarantinedPackage {
+                        id: 0,
+                        package_name: pkg_name.clone(),
+                        package_version: pkg_version.clone(),
+                        ecosystem: ecosystem_dir.to_string(),
+                        severity: report_clone.severity as i64,
+                        recommendation: report_clone.recommendation.clone(),
+                        archive_path,
+                        archive_size,
+                        metadata_path,
+                        quarantined_at: String::new(),
+                        report_id: q_report_id,
+                    };
+                    if let Err(e) = db.insert_quarantined_package(&qp).await {
+                        log::warn!("failed to record quarantine in DB for {}: {}", pkg_name, e);
+                    }
                 }
             });
         }

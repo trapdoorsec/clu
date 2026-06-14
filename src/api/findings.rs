@@ -1,13 +1,13 @@
-//! Finding handlers: create, list, get, update, and OSM report export.
+//! Finding handlers: create, list, get, update, delete, and OSM report export.
 
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::api::{AppError, AppState, require_auth};
+use crate::api::{AppError, AppState, ListResponse, require_auth};
 use crate::db::findings::{Finding, FindingFilters, FindingStatus, FindingUpdate};
 use crate::output::AnalysisReport;
 
@@ -74,6 +74,7 @@ pub struct PatchFindingRequest {
 pub struct ListQuery {
     pub ecosystem: Option<String>,
     pub status: Option<String>,
+    pub name: Option<String>,
     pub min_severity: Option<i64>,
     pub min_score: Option<i64>,
     pub since: Option<String>,
@@ -142,32 +143,47 @@ pub async fn list_findings(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<ListQuery>,
-) -> Result<Json<Vec<FindingResponse>>, AppError> {
+) -> Result<Json<ListResponse<FindingResponse>>, AppError> {
     require_auth(
         headers.get("authorization").and_then(|v| v.to_str().ok()),
         &state.token,
         &state.listen_addr,
     )?;
 
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+
     let filters = FindingFilters {
         ecosystem: params.ecosystem,
         status: params.status,
+        name: params.name,
         min_severity: params.min_severity,
         min_score: params.min_score,
         since: params.since,
-        limit: params.limit,
-        offset: params.offset,
+        limit: Some(limit),
+        offset: Some(offset),
     };
 
+    let total = state
+        .db
+        .count_findings(&filters)
+        .await
+        .map_err(AppError::Internal)?;
     let findings = state
         .db
         .query_findings(&filters)
         .await
         .map_err(AppError::Internal)?;
 
-    Ok(Json(
-        findings.into_iter().map(FindingResponse::from).collect(),
-    ))
+    let items: Vec<FindingResponse> =
+        findings.into_iter().map(FindingResponse::from).collect();
+
+    Ok(Json(ListResponse {
+        items,
+        total,
+        offset,
+        limit,
+    }))
 }
 
 pub async fn get_finding(
@@ -228,6 +244,30 @@ pub async fn update_finding(
         .ok_or_else(|| AppError::NotFound(format!("finding {} not found after update", id)))?;
 
     Ok(Json(FindingResponse::from(finding)))
+}
+
+pub async fn delete_finding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    require_auth(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        &state.token,
+        &state.listen_addr,
+    )?;
+
+    let deleted = state
+        .db
+        .delete_finding(id)
+        .await
+        .map_err(AppError::Internal)?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound(format!("finding {} not found", id)))
+    }
 }
 
 pub async fn get_finding_report(

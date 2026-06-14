@@ -84,6 +84,7 @@ pub struct Finding {
 pub struct FindingFilters {
     pub ecosystem: Option<String>,
     pub status: Option<String>,
+    pub name: Option<String>,
     pub min_severity: Option<i64>,
     pub min_score: Option<i64>,
     pub since: Option<String>,
@@ -192,6 +193,10 @@ impl Database {
             query.push_str(" AND status = ?");
             bindings.push(st.clone());
         }
+        if let Some(ref name) = filters.name {
+            query.push_str(" AND name LIKE ?");
+            bindings.push(format!("%{}%", name));
+        }
         if let Some(min_sev) = filters.min_severity {
             query.push_str(" AND severity >= ?");
             bindings.push(min_sev.to_string());
@@ -270,6 +275,60 @@ impl Database {
         q.execute(&self.pool).await?;
 
         Ok(())
+    }
+
+    /// Count findings matching optional filters.
+    pub async fn count_findings(
+        &self,
+        filters: &FindingFilters,
+    ) -> Result<i64, Box<dyn Error>> {
+        let mut query = String::from(
+            "SELECT COUNT(*) as count FROM findings WHERE 1=1",
+        );
+        let mut bindings: Vec<String> = Vec::new();
+
+        if let Some(ref eco) = filters.ecosystem {
+            query.push_str(" AND ecosystem = ?");
+            bindings.push(eco.clone());
+        }
+        if let Some(ref st) = filters.status {
+            query.push_str(" AND status = ?");
+            bindings.push(st.clone());
+        }
+        if let Some(ref name) = filters.name {
+            query.push_str(" AND name LIKE ?");
+            bindings.push(format!("%{}%", name));
+        }
+        if let Some(min_sev) = filters.min_severity {
+            query.push_str(" AND severity >= ?");
+            bindings.push(min_sev.to_string());
+        }
+        if let Some(min_sc) = filters.min_score {
+            query.push_str(" AND score >= ?");
+            bindings.push(min_sc.to_string());
+        }
+        if let Some(ref since) = filters.since {
+            query.push_str(" AND first_seen >= ?");
+            bindings.push(since.clone());
+        }
+
+        let mut sql_query = sqlx::query(&query);
+        for b in &bindings {
+            sql_query = sql_query.bind(b);
+        }
+
+        let row = sql_query.fetch_one(&self.pool).await?;
+        let count: i64 = row.try_get("count")?;
+        Ok(count)
+    }
+
+    /// Delete a finding by id. Returns true if a row was deleted.
+    pub async fn delete_finding(&self, id: i64) -> Result<bool, Box<dyn Error>> {
+        let result = sqlx::query("DELETE FROM findings WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -410,5 +469,108 @@ mod tests {
         let db = test_db().await;
         let result = db.get_finding(9999).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_count_findings_with_filters() {
+        let db = test_db().await;
+
+        let mut f1 = make_finding("sev-pkg-a");
+        f1.severity = 20;
+        db.insert_finding(&f1).await.unwrap();
+
+        let mut f2 = make_finding("sev-pkg-b");
+        f2.severity = 5;
+        db.insert_finding(&f2).await.unwrap();
+
+        let mut f3 = make_finding("sev-pkg-c");
+        f3.severity = 15;
+        db.insert_finding(&f3).await.unwrap();
+
+        let total = db
+            .count_findings(&FindingFilters {
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(total, 3);
+
+        let high = db
+            .count_findings(&FindingFilters {
+                min_severity: Some(15),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(high, 2);
+
+        let by_ecosystem = db
+            .count_findings(&FindingFilters {
+                ecosystem: Some("pypi".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_ecosystem, 3);
+
+        let by_name = db
+            .count_findings(&FindingFilters {
+                name: Some("sev-pkg".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_name, 3);
+    }
+
+    #[tokio::test]
+    async fn test_delete_finding() {
+        let db = test_db().await;
+        let f = make_finding("del-pkg");
+        let id = db.insert_finding(&f).await.unwrap();
+
+        let got = db.get_finding(id).await.unwrap().unwrap();
+        assert_eq!(got.name, "del-pkg");
+
+        let deleted = db.delete_finding(id).await.unwrap();
+        assert!(deleted);
+
+        let gone = db.get_finding(id).await.unwrap();
+        assert!(gone.is_none());
+
+        let deleted_again = db.delete_finding(id).await.unwrap();
+        assert!(!deleted_again);
+    }
+
+    #[tokio::test]
+    async fn test_query_findings_by_name() {
+        let db = test_db().await;
+
+        let f1 = make_finding("requests-evil");
+        db.insert_finding(&f1).await.unwrap();
+
+        let f2 = make_finding("django-copy");
+        db.insert_finding(&f2).await.unwrap();
+
+        let f3 = make_finding("flask-bad");
+        db.insert_finding(&f3).await.unwrap();
+
+        let results = db
+            .query_findings(&FindingFilters {
+                name: Some("request".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "requests-evil");
+
+        let all = db
+            .query_findings(&FindingFilters {
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3);
     }
 }
