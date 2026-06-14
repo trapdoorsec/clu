@@ -41,13 +41,16 @@ async fn main() {
         }
     };
 
-    let prometheus_handle = PrometheusBuilder::new()
-        .install_recorder()
-        .ok();
+    let prometheus_handle = PrometheusBuilder::new().install_recorder().ok();
 
     metrics::counter!("clu_findings_total").increment(0);
 
-    let app = router(db, config.sidecar.token.clone(), listen_addr.clone(), prometheus_handle);
+    let app = router(
+        db,
+        config.sidecar.token.clone(),
+        listen_addr.clone(),
+        prometheus_handle,
+    );
 
     log::info!("clu-api listening on {}", listen_addr);
     let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();

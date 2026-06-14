@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 
-type FeedResult<'a> = Pin<Box<dyn Future<Output = Result<Vec<PackageRef>, Box<dyn std::error::Error>>> + Send + 'a>>;
+type FeedResult<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<PackageRef>, Box<dyn std::error::Error>>> + Send + 'a>>;
 
 // ── Ecosystem ───────────────────────────────────────────────────────────
 

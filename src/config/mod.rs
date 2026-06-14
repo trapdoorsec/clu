@@ -23,6 +23,8 @@ pub struct Config {
     pub sidecar: SidecarConfig,
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    #[serde(default)]
+    pub quarantine: QuarantineConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -284,6 +286,54 @@ impl Default for NotificationsConfig {
             generic_webhook: None,
             min_severity: default_min_severity(),
             timeout_secs: default_notification_timeout(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuarantineConfig {
+    #[serde(default = "default_quarantine_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_quarantine_dir")]
+    pub directory: String,
+    #[serde(default = "default_quarantine_min_severity")]
+    pub min_severity: u8,
+    #[serde(default = "default_quarantine_max_age_days")]
+    pub max_age_days: u64,
+    #[serde(default = "default_quarantine_max_disk_mb")]
+    pub max_disk_mb: u64,
+    #[serde(default = "default_quarantine_retain_metadata")]
+    pub retain_metadata: bool,
+}
+
+fn default_quarantine_enabled() -> bool {
+    true
+}
+fn default_quarantine_dir() -> String {
+    "/home/cluuser/quarantine".to_string()
+}
+fn default_quarantine_min_severity() -> u8 {
+    5
+}
+fn default_quarantine_max_age_days() -> u64 {
+    3
+}
+fn default_quarantine_max_disk_mb() -> u64 {
+    1024
+}
+fn default_quarantine_retain_metadata() -> bool {
+    true
+}
+
+impl Default for QuarantineConfig {
+    fn default() -> Self {
+        QuarantineConfig {
+            enabled: default_quarantine_enabled(),
+            directory: default_quarantine_dir(),
+            min_severity: default_quarantine_min_severity(),
+            max_age_days: default_quarantine_max_age_days(),
+            max_disk_mb: default_quarantine_max_disk_mb(),
+            retain_metadata: default_quarantine_retain_metadata(),
         }
     }
 }

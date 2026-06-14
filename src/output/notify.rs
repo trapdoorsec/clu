@@ -61,10 +61,7 @@ fn format_notification(report: &AnalysisReport) -> String {
         "[CLU] {} — {} {} (severity: {}/{})",
         report.recommendation,
         report.package_name,
-        report
-            .package_version
-            .as_deref()
-            .unwrap_or("unknown"),
+        report.package_version.as_deref().unwrap_or("unknown"),
         severity_label,
         report.severity,
     ));
@@ -81,7 +78,10 @@ fn format_notification(report: &AnalysisReport) -> String {
     }
     if let Some(ref gd) = report.guarddog_result {
         for f in &gd.findings {
-            lines.push(format!("  guarddog: {} [{}] — {}", f.rule_name, f.severity, f.description));
+            lines.push(format!(
+                "  guarddog: {} [{}] — {}",
+                f.rule_name, f.severity, f.description
+            ));
         }
     }
     if let Some(ref llm) = report.llm_analysis
@@ -104,7 +104,10 @@ async fn send_slack(url: &str, message: &str, cfg: &NotificationsConfig) {
     {
         Ok(resp) => {
             if resp.status().is_success() {
-                log::info!("slack notification sent for {}", message.lines().next().unwrap_or(""));
+                log::info!(
+                    "slack notification sent for {}",
+                    message.lines().next().unwrap_or("")
+                );
             } else {
                 log::warn!("slack returned status {} for {}", resp.status(), url);
             }
@@ -137,7 +140,12 @@ async fn send_discord(url: &str, message: &str, cfg: &NotificationsConfig) {
     }
 }
 
-async fn send_generic(url: &str, _message: &str, report: &AnalysisReport, cfg: &NotificationsConfig) {
+async fn send_generic(
+    url: &str,
+    _message: &str,
+    report: &AnalysisReport,
+    cfg: &NotificationsConfig,
+) {
     match reqwest::Client::new()
         .post(url)
         .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
@@ -149,7 +157,11 @@ async fn send_generic(url: &str, _message: &str, report: &AnalysisReport, cfg: &
             if resp.status().is_success() {
                 log::info!("generic webhook sent for {}", report.package_name);
             } else {
-                log::warn!("generic webhook returned status {} for {}", resp.status(), url);
+                log::warn!(
+                    "generic webhook returned status {} for {}",
+                    resp.status(),
+                    url
+                );
             }
         }
         Err(e) => {

@@ -49,7 +49,7 @@ impl PackageStatus {
     }
 
     #[allow(dead_code)]
-fn from_str(s: &str) -> Result<Self, String> {
+    fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "queued" => Ok(PackageStatus::Queued),
             "heuristics" => Ok(PackageStatus::Heuristics),

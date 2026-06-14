@@ -17,10 +17,7 @@ impl Formatter for TextFormatter {
             "\n[{}] {} {} (severity: {}/{}):\n",
             report.recommendation,
             report.package_name,
-            report
-                .package_version
-                .as_deref()
-                .unwrap_or(""),
+            report.package_version.as_deref().unwrap_or(""),
             severity_label,
             report.severity,
         ));
@@ -40,10 +37,7 @@ impl Formatter for TextFormatter {
         if !report.typosquat_matches.is_empty() {
             for typo in &report.typosquat_matches {
                 findings_count += 1;
-                output.push_str(&format!(
-                    "  TYPOSQUAT: {}\n",
-                    typo.evidence
-                ));
+                output.push_str(&format!("  TYPOSQUAT: {}\n", typo.evidence));
             }
         }
 
@@ -63,10 +57,7 @@ impl Formatter for TextFormatter {
             && llm.is_malicious
         {
             findings_count += 1;
-            output.push_str(&format!(
-                "  LLM: MALICIOUS - {}\n",
-                llm.reasoning
-            ));
+            output.push_str(&format!("  LLM: MALICIOUS - {}\n", llm.reasoning));
         }
 
         if findings_count == 0 {
@@ -100,11 +91,7 @@ mod tests {
             is_malicious: false,
             recommendation: "IGNORE".to_string(),
         };
-        if let Some(o) = overrides {
-            o
-        } else {
-            base
-        }
+        if let Some(o) = overrides { o } else { base }
     }
 
     #[test]

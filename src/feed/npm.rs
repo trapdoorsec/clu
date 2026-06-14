@@ -75,9 +75,7 @@ pub async fn fetch_npm_changes(
                 let latest_version = meta
                     .versions
                     .keys()
-                    .max_by(|a, b| {
-                        semver_cmp(a, b)
-                    })
+                    .max_by(|a, b| semver_cmp(a, b))
                     .cloned();
 
                 packages.push(PackageRef {
@@ -110,9 +108,7 @@ pub async fn fetch_npm_changes(
     Ok((packages, last_seq))
 }
 
-async fn resolve_npm_metadata(
-    package_name: &str,
-) -> Result<NpmPackageMetadata, Box<dyn Error>> {
+async fn resolve_npm_metadata(package_name: &str) -> Result<NpmPackageMetadata, Box<dyn Error>> {
     let url = format!("https://registry.npmjs.org/{}", package_name);
     let response = reqwest::Client::new()
         .get(&url)
@@ -160,7 +156,8 @@ mod tests {
 
     #[test]
     fn test_changes_response_deserialize() {
-        let json = r#"{"results":[{"id":"express","changes":[{"rev":"1-abc"}]}],"last_seq":"42-g1AAAAF"}"#;
+        let json =
+            r#"{"results":[{"id":"express","changes":[{"rev":"1-abc"}]}],"last_seq":"42-g1AAAAF"}"#;
         let resp: ChangesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.results.len(), 1);
         assert_eq!(resp.results[0].id, "express");

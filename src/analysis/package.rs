@@ -31,6 +31,7 @@ pub struct FileEntry {
 // ── Package contents (entirely in-memory, no TempDir) ───────────────────
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct PackageContents {
     pub files: Vec<FileEntry>,
     #[allow(dead_code)]
@@ -532,8 +533,71 @@ pub fn format_source_bundle(bundle: &SourceBundle) -> String {
     out
 }
 
+// ── Downloaded package with raw bytes preserved ──────────────────────────
+
+#[derive(Clone)]
+pub struct DownloadedPackage {
+    pub raw_data: Vec<u8>,
+    pub download_url: String,
+    pub contents: PackageContents,
+}
+
 // ── Download and extract (main entry points) ─────────────────────────────
 
+enum ResolvedUrl {
+    Direct(String),
+    FallbackNeeded,
+}
+
+async fn resolve_download_url(package_name: &str, package_version: Option<&str>) -> ResolvedUrl {
+    if let Some(version) = package_version {
+        log::info!(
+            "Fetching download URL for '{}' version {}...",
+            package_name,
+            version
+        );
+        match fetch_download_url(package_name, version).await {
+            Ok(url) => ResolvedUrl::Direct(url),
+            Err(_) => {
+                log::warn!(
+                    "Could not fetch download URL for {} {}",
+                    package_name,
+                    version
+                );
+                ResolvedUrl::FallbackNeeded
+            }
+        }
+    } else {
+        log::info!("Fetching latest version of '{}' from PyPI...", package_name);
+        match fetch_download_url_latest(package_name).await {
+            Ok((_version, url)) => ResolvedUrl::Direct(url),
+            Err(_) => {
+                log::warn!(
+                    "Could not fetch download URL from PyPI for {}",
+                    package_name
+                );
+                log::info!("Trying fallback URL without version...");
+                ResolvedUrl::FallbackNeeded
+            }
+        }
+    }
+}
+
+pub async fn download_package(
+    package_name: &str,
+    package_version: Option<&str>,
+) -> Result<(Vec<u8>, String), String> {
+    match resolve_download_url(package_name, package_version).await {
+        ResolvedUrl::Direct(url) => {
+            log::info!("Downloading package from: {}", url);
+            let package_data = download_bytes(&url).await.map_err(|e| format!("{}", e))?;
+            Ok((package_data, url))
+        }
+        ResolvedUrl::FallbackNeeded => download_package_fallback_raw(package_name).await,
+    }
+}
+
+#[allow(dead_code)]
 pub async fn download_and_extract_package(
     package_name: &str,
     package_version: Option<&str>,
@@ -542,48 +606,35 @@ pub async fn download_and_extract_package(
     download_and_extract_package_with_config(package_name, package_version, &config).await
 }
 
+#[allow(dead_code)]
 pub async fn download_and_extract_package_with_config(
     package_name: &str,
     package_version: Option<&str>,
     config: &ExtractionConfig,
 ) -> Result<PackageContents, Box<dyn std::error::Error>> {
-    let url = if let Some(version) = package_version {
-        log::info!(
-            "Fetching download URL for '{}' version {}...",
-            package_name,
-            version
-        );
-        match fetch_download_url(package_name, version).await {
-            Ok(url) => url,
-            Err(e) => {
-                log::warn!("Could not fetch download URL: {}", e);
-                return download_package_fallback_with_config(package_name, config).await;
-            }
-        }
-    } else {
-        log::info!("Fetching latest version of '{}' from PyPI...", package_name);
-        match fetch_download_url_latest(package_name).await {
-            Ok((version, url)) => {
-                log::info!("Found version: {}", version);
-                url
-            }
-            Err(e) => {
-                log::warn!("Could not fetch download URL from PyPI: {}", e);
-                log::info!("Trying fallback URL without version...");
-                return download_package_fallback_with_config(package_name, config).await;
-            }
-        }
-    };
-
-    log::info!("Downloading package from: {}", url);
-    let package_data = download_bytes(&url).await?;
+    let (package_data, url) = download_package(package_name, package_version)
+        .await
+        .map_err(|e| Box::new(std::io::Error::other(e)))?;
     extract_archive_in_memory(&package_data, &url, config, Ecosystem::PyPI)
 }
 
-async fn download_package_fallback_with_config(
+pub async fn download_and_extract_full(
     package_name: &str,
+    package_version: Option<&str>,
     config: &ExtractionConfig,
-) -> Result<PackageContents, Box<dyn std::error::Error>> {
+) -> Result<DownloadedPackage, Box<dyn std::error::Error>> {
+    let (raw_data, url) = download_package(package_name, package_version)
+        .await
+        .map_err(|e| Box::new(std::io::Error::other(e)))?;
+    let contents = extract_archive_in_memory(&raw_data, &url, config, Ecosystem::PyPI)?;
+    Ok(DownloadedPackage {
+        raw_data,
+        download_url: url,
+        contents,
+    })
+}
+
+async fn download_package_fallback_raw(package_name: &str) -> Result<(Vec<u8>, String), String> {
     log::info!("Using fallback: fetching package links from PyPI simple API");
     let simple_url = format!("https://pypi.org/simple/{}/", package_name);
 
@@ -598,11 +649,13 @@ async fn download_package_fallback_with_config(
             "Package '{}' not found on PyPI (HTTP {})",
             package_name,
             response.status()
-        )
-        .into());
+        ));
     }
 
-    let html = response.text().await?;
+    let html = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
     let distribution_url = html
         .lines()
         .find(|line| line.contains(".tar.gz") && line.contains("href="))
@@ -615,15 +668,27 @@ async fn download_package_fallback_with_config(
 
     if let Some(dist_url) = distribution_url {
         log::info!("Found package at: {}", dist_url);
-        let package_data = download_bytes(&dist_url).await?;
-        return extract_archive_in_memory(&package_data, &dist_url, config, Ecosystem::PyPI);
+        let package_data = download_bytes(&dist_url)
+            .await
+            .map_err(|e| format!("{}", e))?;
+        return Ok((package_data, dist_url));
     }
 
     Err(format!(
         "Could not find source distribution (.tar.gz) or wheel (.whl) for '{}' on PyPI",
         package_name
-    )
-    .into())
+    ))
+}
+
+#[allow(dead_code)]
+async fn download_package_fallback_with_config(
+    package_name: &str,
+    config: &ExtractionConfig,
+) -> Result<PackageContents, Box<dyn std::error::Error>> {
+    let (raw_data, url) = download_package_fallback_raw(package_name)
+        .await
+        .map_err(|e| Box::new(std::io::Error::other(e)))?;
+    extract_archive_in_memory(&raw_data, &url, config, Ecosystem::PyPI)
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

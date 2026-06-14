@@ -21,6 +21,12 @@ struct ConfigValues {
     typosquat_enabled: bool,
     guarddog_enabled: bool,
     llm_enabled: bool,
+    quarantine_enabled: bool,
+    quarantine_dir: String,
+    quarantine_min_severity: u8,
+    quarantine_max_age_days: u64,
+    quarantine_max_disk_mb: u64,
+    quarantine_retain_metadata: bool,
 }
 
 pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -192,6 +198,76 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         .default(false)
         .interact()?;
 
+    // === Quarantine Configuration ===
+    matrix_glitch("\n.:* Quarantine Configuration\n", 10, use_color);
+    println!("Configure quarantine of suspicious packages for deeper investigation.\n");
+
+    let quarantine_enabled = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enable package quarantine for suspicious packages?")
+        .default(true)
+        .interact()?;
+
+    let quarantine_dir: String = if quarantine_enabled {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Quarantine directory (where suspicious packages are saved)")
+            .default("/tmp/clu-quarantine".to_string())
+            .interact_text()?
+    } else {
+        "/tmp/clu-quarantine".to_string()
+    };
+
+    let quarantine_min_severity_options = [
+        ("1 - LOW (quarantine everything)", 1),
+        (
+            "5 - MEDIUM (quarantine suspicious packages) - Recommended",
+            5,
+        ),
+        ("13 - HIGH (quarantine only high-risk packages)", 13),
+        ("20 - CRITICAL (quarantine only critical packages)", 20),
+    ];
+    let quarantine_min_severity = if quarantine_enabled {
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Minimum severity to quarantine a package")
+            .default(1)
+            .items(
+                &quarantine_min_severity_options
+                    .iter()
+                    .map(|(label, _)| label)
+                    .collect::<Vec<_>>(),
+            )
+            .interact()?;
+        quarantine_min_severity_options[sel].1
+    } else {
+        5
+    };
+
+    let quarantine_max_age_days: u64 = if quarantine_enabled {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Maximum quarantine age in days (auto-delete after this)")
+            .default(3)
+            .interact_text()?
+    } else {
+        3
+    };
+
+    let quarantine_max_disk_mb: u64 = if quarantine_enabled {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Maximum quarantine disk usage in MB (evict oldest when exceeded)")
+            .default(1024)
+            .interact_text()?
+    } else {
+        1024
+    };
+
+    let quarantine_retain_metadata = if quarantine_enabled {
+        Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Save analysis report alongside quarantined archive?")
+            .default(true)
+            .interact()?
+    } else {
+        true
+    };
+
     // === Output Configuration ===
     matrix_glitch("\n.:* Output Configuration\n", 10, use_color);
     println!("Configure how CLU outputs detection results.\n");
@@ -242,6 +318,12 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         typosquat_enabled,
         guarddog_enabled,
         llm_enabled,
+        quarantine_enabled,
+        quarantine_dir,
+        quarantine_min_severity,
+        quarantine_max_age_days,
+        quarantine_max_disk_mb,
+        quarantine_retain_metadata,
     };
 
     let config_content = generate_toml(&config_values);
@@ -337,6 +419,25 @@ guarddog = {}
 
 # Enable LLM semantic code analysis (requires download, slower)
 llm = {}
+
+[quarantine]
+# Enable package quarantine for suspicious packages
+enabled = {}
+
+# Directory where quarantined packages are saved
+directory = "{}"
+
+# Minimum severity to quarantine a package (1=LOW, 5=MEDIUM, 13=HIGH, 20=CRITICAL)
+min_severity = {}
+
+# Maximum age in days before auto-deleting quarantined packages
+max_age_days = {}
+
+# Maximum disk usage in MB (evicts oldest when exceeded)
+max_disk_mb = {}
+
+# Save analysis report (report.json) alongside quarantined archive
+retain_metadata = {}
 "#,
         config.feed_endpoint,
         config.popular_packages_endpoint,
@@ -354,7 +455,13 @@ llm = {}
         config.heuristics_enabled,
         config.typosquat_enabled,
         config.guarddog_enabled,
-        config.llm_enabled
+        config.llm_enabled,
+        config.quarantine_enabled,
+        config.quarantine_dir,
+        config.quarantine_min_severity,
+        config.quarantine_max_age_days,
+        config.quarantine_max_disk_mb,
+        config.quarantine_retain_metadata
     )
 }
 
@@ -411,6 +518,12 @@ mod tests {
             typosquat_enabled: true,
             guarddog_enabled: true,
             llm_enabled: true,
+            quarantine_enabled: true,
+            quarantine_dir: "/tmp/clu-quarantine".to_string(),
+            quarantine_min_severity: 5,
+            quarantine_max_age_days: 3,
+            quarantine_max_disk_mb: 1024,
+            quarantine_retain_metadata: true,
         };
 
         let toml = generate_toml(&config);
@@ -444,6 +557,12 @@ mod tests {
             typosquat_enabled: true,
             guarddog_enabled: false,
             llm_enabled: false,
+            quarantine_enabled: false,
+            quarantine_dir: "/tmp/clu-quarantine".to_string(),
+            quarantine_min_severity: 5,
+            quarantine_max_age_days: 3,
+            quarantine_max_disk_mb: 1024,
+            quarantine_retain_metadata: true,
         };
 
         let toml = generate_toml(&config);

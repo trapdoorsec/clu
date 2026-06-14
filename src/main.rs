@@ -6,8 +6,8 @@ use clap::{arg, command};
 
 use crate::analysis::heuristics;
 use crate::config::Config;
-use crate::feed::ecosystem::{Ecosystem, PackageRef, PyPIRegistry};
 use crate::feed::ecosystem::NpmRegistry;
+use crate::feed::ecosystem::{Ecosystem, PackageRef, PyPIRegistry};
 
 // modules
 mod analysis;
@@ -18,6 +18,7 @@ mod feed;
 mod glitch;
 mod init;
 mod output;
+mod quarantine;
 
 /// Main entry point for the CLU (Command Line Utility) malware scanner.
 ///
@@ -94,7 +95,10 @@ fn handle_scan(args: &ArgMatches) {
         }
     };
     let version = args.get_one::<String>("pkg-version").cloned();
-    let format_str = args.get_one::<String>("format").map(|s| s.as_str()).unwrap_or("auto");
+    let format_str = args
+        .get_one::<String>("format")
+        .map(|s| s.as_str())
+        .unwrap_or("auto");
 
     let config = Config::load("config.toml").ok();
     let heuristics = match heuristics::HeuristicRules::load("heuristics.toml") {
@@ -135,14 +139,20 @@ fn handle_scan(args: &ArgMatches) {
         };
 
         match analyze_package(&package, config.as_ref(), &heuristics, &database).await {
-            Ok(report) => {
+            Ok(result) => {
                 let formatter = get_formatter(format_str);
-                let formatted = formatter.format_report(&report);
+                let formatted = formatter.format_report(&result.report);
                 println!("{}", formatted);
 
-                persist_and_notify(&report, database.as_ref(), config.as_ref()).await;
+                persist_and_notify(
+                    &result.report,
+                    database.as_ref(),
+                    config.as_ref(),
+                    result.quarantine_payload,
+                )
+                .await;
 
-                if report.is_malicious {
+                if result.report.is_malicious {
                     std::process::exit(1);
                 }
             }
@@ -157,7 +167,10 @@ fn handle_scan(args: &ArgMatches) {
 fn handle_watch(args: &ArgMatches) {
     use owo_colors::OwoColorize;
 
-    let format_str = args.get_one::<String>("format").map(|s| s.as_str()).unwrap_or("auto");
+    let format_str = args
+        .get_one::<String>("format")
+        .map(|s| s.as_str())
+        .unwrap_or("auto");
 
     let config = Config::load("config.toml").ok();
 
@@ -208,7 +221,15 @@ fn handle_watch(args: &ArgMatches) {
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        if let Err(e) = watch_feed(url, poll_interval, check_updates, config.as_ref(), format_str).await {
+        if let Err(e) = watch_feed(
+            url,
+            poll_interval,
+            check_updates,
+            config.as_ref(),
+            format_str,
+        )
+        .await
+        {
             eprintln!("Watch failed: {}", e);
             std::process::exit(1);
         }
@@ -240,6 +261,7 @@ async fn persist_and_notify(
     report: &output::AnalysisReport,
     database: Option<&db::Database>,
     config: Option<&Config>,
+    quarantine_payload: Option<quarantine::QuarantinePayload>,
 ) {
     if let Some(db) = database {
         let package_name = report.package_name.as_str();
@@ -277,6 +299,64 @@ async fn persist_and_notify(
         tokio::spawn(async move {
             output::notify::notify_finding(&report_clone, &notif_cfg).await;
         });
+    }
+
+    if let Some(cfg) = config
+        && cfg.quarantine.enabled
+        && report.severity >= cfg.quarantine.min_severity
+    {
+        if let Some(payload) = quarantine_payload {
+            let report_clone = report.clone();
+            let qcfg = cfg.quarantine.clone();
+            let payload_clone = payload.clone();
+            let pkg_name = payload_clone.package_name.clone();
+            tokio::spawn(async move {
+                if let Err(e) = quarantine::quarantine_package(
+                    &payload_clone.package_name,
+                    payload_clone.package_version.as_deref(),
+                    payload_clone.ecosystem,
+                    &payload_clone.raw_data,
+                    &payload_clone.download_url,
+                    &report_clone,
+                    &qcfg,
+                )
+                .await
+                {
+                    log::warn!("quarantine failed for {}: {}", pkg_name, e);
+                }
+            });
+        } else {
+            let report_clone = report.clone();
+            let qcfg = cfg.quarantine.clone();
+            let pkg_name = report.package_name.clone();
+            let pkg_version = report.package_version.clone();
+            let ecosystem = report.ecosystem;
+            tokio::spawn(async move {
+                let download_result =
+                    crate::analysis::package::download_package(&pkg_name, pkg_version.as_deref())
+                        .await;
+                let (raw_data, url) = match download_result {
+                    Ok(data) => data,
+                    Err(e) => {
+                        log::warn!("quarantine download failed for {}: {}", pkg_name, e);
+                        return;
+                    }
+                };
+                if let Err(e) = quarantine::quarantine_package(
+                    &pkg_name,
+                    pkg_version.as_deref(),
+                    ecosystem,
+                    &raw_data,
+                    &url,
+                    &report_clone,
+                    &qcfg,
+                )
+                .await
+                {
+                    log::warn!("quarantine failed for {}: {}", pkg_name, e);
+                }
+            });
+        }
     }
 }
 
@@ -357,7 +437,9 @@ async fn watch_feed(
                 url,
                 config
                     .map(|c| c.feed.popular_packages_endpoint.as_str())
-                    .unwrap_or("https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json"),
+                    .unwrap_or(
+                        "https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json",
+                    ),
             );
             match pypi_registry.fetch_feed().await {
                 Ok(packages) => {
@@ -428,12 +510,18 @@ async fn watch_feed(
                 }
 
                 match analyze_package(package, config, &heuristics, &database).await {
-                    Ok(report) => {
+                    Ok(result) => {
                         let formatter = get_formatter(format_str);
-                        let formatted = formatter.format_report(&report);
+                        let formatted = formatter.format_report(&result.report);
                         println!("{}", formatted);
 
-                        persist_and_notify(&report, database.as_ref(), config).await;
+                        persist_and_notify(
+                            &result.report,
+                            database.as_ref(),
+                            config,
+                            result.quarantine_payload,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         eprintln!(
@@ -461,12 +549,17 @@ async fn watch_feed(
     }
 }
 
+struct AnalysisResult {
+    report: output::AnalysisReport,
+    quarantine_payload: Option<quarantine::QuarantinePayload>,
+}
+
 async fn analyze_package(
     package: &PackageRef,
     config: Option<&Config>,
     heuristics: &Option<analysis::heuristics::HeuristicRules>,
     database: &Option<db::Database>,
-) -> Result<output::AnalysisReport, Box<dyn std::error::Error>> {
+) -> Result<AnalysisResult, Box<dyn std::error::Error>> {
     use chrono::Utc;
 
     let package_name = package.title.as_deref().unwrap_or("unknown");
@@ -495,24 +588,50 @@ async fn analyze_package(
     // Determine if we need to download package for GuardDog and LLM
     let guarddog_enabled = is_stage_enabled(pipeline_config.map(|p| p.guarddog));
     let llm_enabled = is_stage_enabled(pipeline_config.map(|p| p.llm));
+    let _quarantine_enabled = config.map(|c| c.quarantine.enabled).unwrap_or(false);
 
-    // Try to download package, but don't let failure skip stages
-    let package_result = if guarddog_enabled || llm_enabled {
-        Some(analysis::package::download_and_extract_package(package_name, None).await)
+    // Try to download package for GuardDog, LLM, or quarantine
+    let downloaded = if guarddog_enabled || llm_enabled {
+        let extraction_config = config::ExtractionConfig::default();
+        match analysis::package::download_and_extract_full(package_name, None, &extraction_config)
+            .await
+        {
+            Ok(d) => Some(d),
+            Err(e) => {
+                log::warn!("Failed to download package {}: {}", package_name, e);
+                None
+            }
+        }
     } else {
         None
     };
 
+    let quarantine_payload = downloaded.as_ref().map(|d| quarantine::QuarantinePayload {
+        raw_data: d.raw_data.clone(),
+        download_url: d.download_url.clone(),
+        package_name: package_name.to_string(),
+        package_version: package.version.clone(),
+        ecosystem: package.ecosystem,
+    });
+
+    let package_contents: Option<analysis::package::PackageContents> =
+        downloaded
+            .as_ref()
+            .map(|d| analysis::package::PackageContents {
+                files: d.contents.files.clone(),
+                ecosystem: d.contents.ecosystem,
+                sha256: d.contents.sha256.clone(),
+            });
+
     // Run GuardDog stage
-    if guarddog_enabled
-        && let Some(db) = database
-    {
+    if guarddog_enabled && let Some(db) = database {
         let _ = db
             .update_package_status(package_name, db::PackageStatus::GuardDog, None)
             .await;
     }
 
-    let guarddog_result = run_guarddog_stage(package_name, &package_result, guarddog_enabled).await;
+    let guarddog_result =
+        run_guarddog_stage(package_name, &package_contents, guarddog_enabled).await;
 
     // Run LLM stage last - it aggregates all findings
     let llm_analysis = if llm_enabled {
@@ -524,7 +643,7 @@ async fn analyze_package(
         run_llm_stage(
             package_name,
             config,
-            &package_result,
+            &package_contents,
             &heuristic_matches,
             &typosquat_matches,
             &guarddog_result,
@@ -567,15 +686,17 @@ async fn analyze_package(
 
     let recommendation = if severity <= 4 { "IGNORE" } else { "INSPECT" }.to_string();
 
-    Ok(output::AnalysisReport {
+    let sha256 = package_contents
+        .as_ref()
+        .map(|c| c.sha256.clone())
+        .unwrap_or_default();
+
+    let report = output::AnalysisReport {
         package_name: package_name.to_string(),
         package_version: None,
         timestamp: Utc::now().to_rfc3339(),
         ecosystem: package.ecosystem,
-        sha256: package_result
-            .as_ref()
-            .map(|r| r.as_ref().map(|c| c.sha256.clone()).unwrap_or_default())
-            .unwrap_or_default(),
+        sha256,
         heuristic_matches,
         typosquat_matches,
         guarddog_result,
@@ -584,6 +705,11 @@ async fn analyze_package(
         severity,
         is_malicious,
         recommendation,
+    };
+
+    Ok(AnalysisResult {
+        report,
+        quarantine_payload,
     })
 }
 
@@ -664,9 +790,7 @@ async fn run_typosquat_stage(
 /// Stage 3: GuardDog Analysis
 async fn run_guarddog_stage(
     package_name: &str,
-    _package_result: &Option<
-        Result<analysis::package::PackageContents, Box<dyn std::error::Error>>,
-    >,
+    _package_contents: &Option<analysis::package::PackageContents>,
     enabled: bool,
 ) -> Option<output::GuardDogResult> {
     use owo_colors::OwoColorize;
@@ -697,7 +821,7 @@ async fn run_guarddog_stage(
 async fn run_llm_stage(
     package_name: &str,
     config: Option<&Config>,
-    package_result: &Option<Result<analysis::package::PackageContents, Box<dyn std::error::Error>>>,
+    package_contents: &Option<analysis::package::PackageContents>,
     heuristic_matches: &[output::HeuristicMatch],
     typosquat_matches: &[output::TypoSquatterMatch],
     guarddog_result: &Option<output::GuardDogResult>,
@@ -713,16 +837,8 @@ async fn run_llm_stage(
 
     if let Some(cfg) = config.map(|c| &c.llm) {
         // Check if package download succeeded
-        let package_contents = match package_result {
-            Some(Ok(contents)) => contents,
-            Some(Err(e)) => {
-                eprintln!(
-                    "{} Stage 4: Package download failed, cannot run LLM analysis: {}",
-                    "[!]".yellow(),
-                    e
-                );
-                return None;
-            }
+        let package_contents = match package_contents {
+            Some(contents) => contents,
             None => {
                 eprintln!(
                     "{} Stage 4: Package download was not attempted, cannot run LLM analysis",

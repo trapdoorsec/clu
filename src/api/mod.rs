@@ -34,7 +34,12 @@ pub struct AppState {
 }
 
 /// Build the axum router with all API routes.
-pub fn router(db: crate::db::Database, token: Option<String>, listen_addr: String, prometheus_handle: Option<PrometheusHandle>) -> Router {
+pub fn router(
+    db: crate::db::Database,
+    token: Option<String>,
+    listen_addr: String,
+    prometheus_handle: Option<PrometheusHandle>,
+) -> Router {
     let state = AppState {
         db,
         token,

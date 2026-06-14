@@ -8,3 +8,4 @@ pub mod feed;
 pub mod glitch;
 pub mod init;
 pub mod output;
+pub mod quarantine;
