@@ -27,6 +27,12 @@ struct ConfigValues {
     quarantine_max_age_days: u64,
     quarantine_max_disk_mb: u64,
     quarantine_retain_metadata: bool,
+    notifications_enabled: bool,
+    discord_webhook: Option<String>,
+    slack_webhook: Option<String>,
+    generic_webhook: Option<String>,
+    notifications_min_severity: u8,
+    notifications_timeout_secs: u64,
 }
 
 pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -299,6 +305,94 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         .default(true)
         .interact()?;
 
+    // === Notifications Configuration ===
+    matrix_glitch("\n.:* Notifications Configuration\n", 10, use_color);
+    println!("Configure webhook notifications for alerts (Discord, Slack, or generic).\n");
+
+    let notifications_enabled = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enable notification webhooks?")
+        .default(false)
+        .interact()?;
+
+    let (discord_webhook, slack_webhook, generic_webhook) = if notifications_enabled {
+        let enable_discord = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Configure Discord webhook?")
+            .default(false)
+            .interact()?;
+        let discord_webhook: Option<String> = if enable_discord {
+            Some(
+                Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Discord webhook URL")
+                    .interact_text()?,
+            )
+        } else {
+            None
+        };
+
+        let enable_slack = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Configure Slack webhook?")
+            .default(false)
+            .interact()?;
+        let slack_webhook: Option<String> = if enable_slack {
+            Some(
+                Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slack webhook URL")
+                    .interact_text()?,
+            )
+        } else {
+            None
+        };
+
+        let enable_generic = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Configure generic webhook?")
+            .default(false)
+            .interact()?;
+        let generic_webhook: Option<String> = if enable_generic {
+            Some(
+                Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Generic webhook URL")
+                    .interact_text()?,
+            )
+        } else {
+            None
+        };
+
+        (discord_webhook, slack_webhook, generic_webhook)
+    } else {
+        (None, None, None)
+    };
+
+    let notifications_min_severity_options = [
+        ("1 - LOW (notify on all findings)", 1),
+        ("5 - MEDIUM (notify on suspicious packages)", 5),
+        ("13 - HIGH (notify on high-risk packages) - Recommended", 13),
+        ("20 - CRITICAL (notify only on critical packages)", 20),
+    ];
+    let notifications_min_severity = if notifications_enabled {
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Minimum severity to trigger notifications")
+            .default(2)
+            .items(
+                &notifications_min_severity_options
+                    .iter()
+                    .map(|(label, _)| label)
+                    .collect::<Vec<_>>(),
+            )
+            .interact()?;
+        notifications_min_severity_options[sel].1
+    } else {
+        13
+    };
+
+    let notifications_timeout_secs: u64 = if notifications_enabled {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Notification request timeout (seconds)")
+            .default(10)
+            .interact_text()?
+    } else {
+        10
+    };
+
     // === Generate TOML ===
     let config_values = ConfigValues {
         feed_endpoint,
@@ -324,6 +418,12 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         quarantine_max_age_days,
         quarantine_max_disk_mb,
         quarantine_retain_metadata,
+        notifications_enabled,
+        discord_webhook,
+        slack_webhook,
+        generic_webhook,
+        notifications_min_severity,
+        notifications_timeout_secs,
     };
 
     let config_content = generate_toml(&config_values);
@@ -353,6 +453,24 @@ fn generate_toml(config: &ConfigValues) -> String {
         format!("webhook = \"{}\"", url)
     } else {
         "# webhook = \"https://your-webhook-url.com\"".to_string()
+    };
+
+    let discord_webhook_line = if let Some(url) = &config.discord_webhook {
+        format!("discord_webhook = \"{}\"", url)
+    } else {
+        "# discord_webhook = \"https://discord.com/api/webhooks/...\"".to_string()
+    };
+
+    let slack_webhook_line = if let Some(url) = &config.slack_webhook {
+        format!("slack_webhook = \"{}\"", url)
+    } else {
+        "# slack_webhook = \"https://hooks.slack.com/services/...\"".to_string()
+    };
+
+    let generic_webhook_line = if let Some(url) = &config.generic_webhook {
+        format!("generic_webhook = \"{}\"", url)
+    } else {
+        "# generic_webhook = \"https://example.com/webhook\"".to_string()
     };
 
     format!(
@@ -438,6 +556,25 @@ max_disk_mb = {}
 
 # Save analysis report (report.json) alongside quarantined archive
 retain_metadata = {}
+
+[notifications]
+# Enable notification webhooks (Discord, Slack, generic)
+enabled = {}
+
+# Discord webhook URL for alerts
+{}
+
+# Slack webhook URL for alerts
+{}
+
+# Generic webhook URL for alerts
+{}
+
+# Minimum severity to trigger notifications (1=LOW, 5=MEDIUM, 13=HIGH, 20=CRITICAL)
+min_severity = {}
+
+# Request timeout in seconds for webhook calls
+timeout_secs = {}
 "#,
         config.feed_endpoint,
         config.popular_packages_endpoint,
@@ -461,7 +598,13 @@ retain_metadata = {}
         config.quarantine_min_severity,
         config.quarantine_max_age_days,
         config.quarantine_max_disk_mb,
-        config.quarantine_retain_metadata
+        config.quarantine_retain_metadata,
+        config.notifications_enabled,
+        discord_webhook_line,
+        slack_webhook_line,
+        generic_webhook_line,
+        config.notifications_min_severity,
+        config.notifications_timeout_secs
     )
 }
 
@@ -524,6 +667,12 @@ mod tests {
             quarantine_max_age_days: 3,
             quarantine_max_disk_mb: 1024,
             quarantine_retain_metadata: true,
+            notifications_enabled: true,
+            discord_webhook: Some("https://discord.com/api/webhooks/test".to_string()),
+            slack_webhook: Some("https://hooks.slack.com/services/test".to_string()),
+            generic_webhook: None,
+            notifications_min_severity: 13,
+            notifications_timeout_secs: 10,
         };
 
         let toml = generate_toml(&config);
@@ -535,6 +684,13 @@ mod tests {
         assert!(toml.contains("typosquat = true"));
         assert!(toml.contains("guarddog = true"));
         assert!(toml.contains("llm = true"));
+        assert!(toml.contains("[notifications]"));
+        assert!(toml.contains("enabled = true"));
+        assert!(toml.contains("discord_webhook = \"https://discord.com/api/webhooks/test\""));
+        assert!(toml.contains("slack_webhook = \"https://hooks.slack.com/services/test\""));
+        assert!(toml.contains("# generic_webhook ="));
+        assert!(toml.contains("min_severity = 13"));
+        assert!(toml.contains("timeout_secs = 10"));
     }
 
     #[test]
@@ -563,12 +719,17 @@ mod tests {
             quarantine_max_age_days: 3,
             quarantine_max_disk_mb: 1024,
             quarantine_retain_metadata: true,
+            notifications_enabled: false,
+            discord_webhook: None,
+            slack_webhook: None,
+            generic_webhook: None,
+            notifications_min_severity: 13,
+            notifications_timeout_secs: 10,
         };
 
         let toml = generate_toml(&config);
 
         assert!(toml.contains("# webhook ="));
-        // Should have commented webhook, not active webhook line
         let has_active_webhook = toml
             .lines()
             .any(|line| line.starts_with("webhook = \"") && !line.starts_with("# webhook"));
@@ -578,5 +739,66 @@ mod tests {
         assert!(toml.contains("typosquat = true"));
         assert!(toml.contains("guarddog = false"));
         assert!(toml.contains("llm = false"));
+        assert!(toml.contains("[notifications]"));
+        assert!(toml.contains("enabled = false"));
+        assert!(toml.contains("# discord_webhook ="));
+        assert!(toml.contains("# slack_webhook ="));
+        assert!(toml.contains("# generic_webhook ="));
+        assert!(toml.contains("min_severity = 13"));
+        assert!(toml.contains("timeout_secs = 10"));
+    }
+
+    #[test]
+    fn test_generate_toml_with_discord_notification() {
+        let config = ConfigValues {
+            feed_endpoint: "https://pypi.org/rss/packages.xml".to_string(),
+            popular_packages_endpoint: "https://example.com/popular.json".to_string(),
+            poll_interval: "30s".to_string(),
+            check_updates: false,
+            llm_endpoint: "http://ollama:11434".to_string(),
+            llm_model: "qwen2.5-coder:7b".to_string(),
+            llm_request_timeout: 30,
+            pip_cache_dir: "/tmp/pip-cache".to_string(),
+            typosquat_threshold: 2,
+            min_package_length: 4,
+            webhook: None,
+            log_level: "info".to_string(),
+            enable_tui: true,
+            heuristics_enabled: true,
+            typosquat_enabled: true,
+            guarddog_enabled: false,
+            llm_enabled: false,
+            quarantine_enabled: true,
+            quarantine_dir: "/tmp/clu-quarantine".to_string(),
+            quarantine_min_severity: 5,
+            quarantine_max_age_days: 3,
+            quarantine_max_disk_mb: 1024,
+            quarantine_retain_metadata: true,
+            notifications_enabled: true,
+            discord_webhook: Some("https://discord.com/api/webhooks/123456789/abcdef".to_string()),
+            slack_webhook: None,
+            generic_webhook: None,
+            notifications_min_severity: 13,
+            notifications_timeout_secs: 15,
+        };
+
+        let toml = generate_toml(&config);
+
+        assert!(toml.contains("[notifications]"));
+        assert!(toml.contains("enabled = true"));
+        assert!(toml.contains("discord_webhook = \"https://discord.com/api/webhooks/123456789/abcdef\""));
+        assert!(toml.contains("# slack_webhook ="));
+        assert!(toml.contains("# generic_webhook ="));
+        assert!(toml.contains("min_severity = 13"));
+        assert!(toml.contains("timeout_secs = 15"));
+
+        let has_active_slack = toml
+            .lines()
+            .any(|line| line.starts_with("slack_webhook = \"") && !line.starts_with("#"));
+        let has_active_generic = toml
+            .lines()
+            .any(|line| line.starts_with("generic_webhook = \"") && !line.starts_with("#"));
+        assert!(!has_active_slack);
+        assert!(!has_active_generic);
     }
 }
