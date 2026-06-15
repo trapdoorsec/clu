@@ -61,11 +61,11 @@ impl Formatter for ColouredTextFormatter {
             }
         }
 
-        // GuardDog - compact
-        if let Some(guarddog) = &report.guarddog_result
-            && !guarddog.findings.is_empty()
+        // YARA - compact
+        if let Some(yara) = &report.yara_result
+            && !yara.findings.is_empty()
         {
-            for finding in &guarddog.findings {
+            for finding in &yara.findings {
                 findings_count += 1;
                 let severity_icon = match finding.severity.to_lowercase().as_str() {
                     "critical" => "🔴",
@@ -84,12 +84,14 @@ impl Formatter for ColouredTextFormatter {
 
         // LLM - compact
         if let Some(llm) = &report.llm_analysis
-            && llm.is_malicious
+            && llm.is_malicious()
         {
             findings_count += 1;
+            let conflicted_label = if llm.conflicted { " [CONFLICTED]" } else { "" };
             output.push_str(&format!(
-                "  {} LLM flagged as malicious: {}\n",
+                "  {} LLM flagged as malicious{}: {}\n",
                 "🤖".yellow(),
+                conflicted_label.red(),
                 llm.reasoning.dimmed()
             ));
         }

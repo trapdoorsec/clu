@@ -278,13 +278,8 @@ impl Database {
     }
 
     /// Count findings matching optional filters.
-    pub async fn count_findings(
-        &self,
-        filters: &FindingFilters,
-    ) -> Result<i64, Box<dyn Error>> {
-        let mut query = String::from(
-            "SELECT COUNT(*) as count FROM findings WHERE 1=1",
-        );
+    pub async fn count_findings(&self, filters: &FindingFilters) -> Result<i64, Box<dyn Error>> {
+        let mut query = String::from("SELECT COUNT(*) as count FROM findings WHERE 1=1");
         let mut bindings: Vec<String> = Vec::new();
 
         if let Some(ref eco) = filters.ecosystem {

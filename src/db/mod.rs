@@ -5,9 +5,9 @@
 //! - Package processing status (for live feed tracking)
 //! - Query/filtering capabilities for the web service
 
+pub mod audit;
 pub mod findings;
 pub mod quarantine;
-pub mod audit;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -38,19 +38,19 @@ pub enum PackageStatus {
     Queued,
     Heuristics,
     Typosquat,
-    GuardDog,
+    Yara,
     Llm,
     Completed,
     Failed,
 }
 
 impl PackageStatus {
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             PackageStatus::Queued => "queued",
             PackageStatus::Heuristics => "heuristics",
             PackageStatus::Typosquat => "typosquat",
-            PackageStatus::GuardDog => "guarddog",
+            PackageStatus::Yara => "yara",
             PackageStatus::Llm => "llm",
             PackageStatus::Completed => "completed",
             PackageStatus::Failed => "failed",
@@ -58,12 +58,13 @@ impl PackageStatus {
     }
 
     #[allow(dead_code)]
-    fn from_str(s: &str) -> Result<Self, String> {
+    pub fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "queued" => Ok(PackageStatus::Queued),
             "heuristics" => Ok(PackageStatus::Heuristics),
             "typosquat" => Ok(PackageStatus::Typosquat),
-            "guarddog" => Ok(PackageStatus::GuardDog),
+            "yara" => Ok(PackageStatus::Yara),
+            "guarddog" => Ok(PackageStatus::Yara),
             "llm" => Ok(PackageStatus::Llm),
             "completed" => Ok(PackageStatus::Completed),
             "failed" => Ok(PackageStatus::Failed),
@@ -378,6 +379,58 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        // Migration: rename guarddog_result → yara_result in existing report_json
+        // Also rename PackageStatus "guarddog" → "yara" in package_status table
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_list WHERE name = 'yara_migration_done'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0i64);
+        let migration_done = count > 0;
+
+        if !migration_done {
+            log::info!(
+                "Running YARA migration: renaming guarddog_result → yara_result in stored reports"
+            );
+
+            if let Err(e) = sqlx::query(
+                r#"
+                UPDATE analysis_reports
+                SET report_json = REPLACE(report_json, '"guarddog_result"', '"yara_result"')
+                WHERE report_json LIKE '%guarddog_result%'
+                "#,
+            )
+            .execute(&self.pool)
+            .await
+            {
+                log::warn!("YARA migration: report_json rename skipped (error): {}", e);
+            }
+
+            if let Err(e) = sqlx::query(
+                r#"
+                UPDATE package_status
+                SET status = 'yara'
+                WHERE status = 'guarddog'
+                "#,
+            )
+            .execute(&self.pool)
+            .await
+            {
+                log::warn!(
+                    "YARA migration: package_status rename skipped (error): {}",
+                    e
+                );
+            }
+
+            sqlx::query("CREATE TABLE IF NOT EXISTS yara_migration_done (id INTEGER PRIMARY KEY)")
+                .execute(&self.pool)
+                .await
+                .ok();
+
+            log::info!("YARA migration complete");
+        }
 
         Ok(())
     }
@@ -790,9 +843,7 @@ impl Database {
         &self,
         filters: &ReportListFilters,
     ) -> Result<i64, Box<dyn Error>> {
-        let mut query = String::from(
-            "SELECT COUNT(*) as count FROM analysis_reports WHERE 1=1",
-        );
+        let mut query = String::from("SELECT COUNT(*) as count FROM analysis_reports WHERE 1=1");
         let mut bindings: Vec<String> = Vec::new();
 
         if let Some(ref name) = filters.package_name {
@@ -863,7 +914,7 @@ mod tests {
             sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 12,
@@ -897,7 +948,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: (i as u8) * 5,
@@ -973,7 +1024,7 @@ mod tests {
             sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 12,
@@ -992,7 +1043,7 @@ mod tests {
             sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 22,
@@ -1023,7 +1074,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: (i as u8) * 4,
@@ -1068,7 +1119,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: 12,
@@ -1125,7 +1176,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: 3,
@@ -1159,7 +1210,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: score,
@@ -1195,7 +1246,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: if i < 5 { 5 } else { 20 },
@@ -1298,7 +1349,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: (i as u8) * 7,
@@ -1325,7 +1376,7 @@ mod tests {
             PackageStatus::Queued,
             PackageStatus::Heuristics,
             PackageStatus::Typosquat,
-            PackageStatus::GuardDog,
+            PackageStatus::Yara,
             PackageStatus::Llm,
             PackageStatus::Completed,
         ];
@@ -1377,7 +1428,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: score,
@@ -1416,7 +1467,7 @@ mod tests {
             sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 12,
@@ -1442,7 +1493,7 @@ mod tests {
             sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 12,
@@ -1485,7 +1536,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: 12,
@@ -1541,7 +1592,7 @@ mod tests {
                 sha256: format!("sha256_{}", i),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: (i as u8) * 5,
@@ -1574,7 +1625,7 @@ mod tests {
             sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 10,
@@ -1590,7 +1641,7 @@ mod tests {
             sha256: String::new(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 15,
@@ -1639,7 +1690,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: if i < 4 { 5 } else { 20 },
@@ -1687,7 +1738,7 @@ mod tests {
                 sha256: String::new(),
                 heuristic_matches: vec![],
                 typosquat_matches: vec![],
-                guarddog_result: None,
+                yara_result: None,
                 injection_detection: None,
                 llm_analysis: None,
                 severity: (i as u8) * 5,

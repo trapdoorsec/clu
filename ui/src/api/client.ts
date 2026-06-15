@@ -12,6 +12,11 @@ import type {
   StatsResponse,
   AuditListResponse,
   AuditFilters,
+  YaraRulesListResponse,
+  YaraRule,
+  CreateRuleRequest,
+  TestRuleRequest,
+  TestRuleResponse,
 } from "./types";
 
 const BASE = "";
@@ -180,6 +185,53 @@ export async function listAuditEntries(
   filters: AuditFilters
 ): Promise<AuditListResponse> {
   return request(`/api/audit-log${qs(filters as Record<string, unknown>)}`);
+}
+
+// ── YARA Rules ─────────────────────────────────────────────────────
+
+export async function listYaraRules(): Promise<YaraRulesListResponse> {
+  return request("/api/rules");
+}
+
+export async function getYaraRule(name: string): Promise<YaraRule> {
+  return request(`/api/rules/${encodeURIComponent(name)}`);
+}
+
+export async function createYaraRule(
+  body: CreateRuleRequest
+): Promise<YaraRule> {
+  return request("/api/rules", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteYaraRule(name: string): Promise<void> {
+  return request(`/api/rules/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function setYaraRuleEnabled(
+  name: string,
+  enabled: boolean
+): Promise<YaraRule> {
+  return request(
+    `/api/rules/${encodeURIComponent(name)}/enable`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }
+  );
+}
+
+export async function testYaraRule(
+  body: TestRuleRequest
+): Promise<TestRuleResponse> {
+  return request("/api/rules/test", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 // ── Health ───────────────────────────────────────────────────────────

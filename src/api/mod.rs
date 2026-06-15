@@ -20,7 +20,12 @@
 //!   GET    /api/quarantine/{id}      — inspect quarantined package
 //!   DELETE /api/quarantine/{id}      — delete quarantined package
 //!   GET    /api/quarantine/{id}/archive — download quarantined archive
-//!   GET    /api/stats                — dashboard statistics
+//!   GET    /api/rules                — list YARA rules
+//!   GET    /api/rules/{name}         — get rule detail
+//!   POST   /api/rules                — create custom rule
+//!   DELETE /api/rules/{name}         — delete custom rule
+//!   PATCH  /api/rules/{name}/enable  — enable/disable rule
+//!   POST   /api/rules/test           — test rule against sample data
 //!   GET    /api/audit-log            — query audit trail
 //!   GET    /healthz                  — liveness (with DB check)
 //!   GET    /metrics                  — Prometheus exposition
@@ -32,18 +37,22 @@ mod metrics;
 mod osm;
 mod quarantine;
 mod reports;
+mod rules;
 mod stats;
 
 use axum::{
     Router,
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 
-pub use self::findings::{BulkUpdateRequest, BulkUpdateResponse, CreateFindingRequest, FindingResponse, PatchFindingRequest};
+pub use self::findings::{
+    BulkUpdateRequest, BulkUpdateResponse, CreateFindingRequest, FindingResponse,
+    PatchFindingRequest,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -96,27 +105,21 @@ pub fn router(
             "/api/findings",
             post(findings::create_finding).get(findings::list_findings),
         )
-        .route(
-            "/api/findings/bulk",
-            post(findings::bulk_update_findings),
-        )
+        .route("/api/findings/bulk", post(findings::bulk_update_findings))
         .route(
             "/api/findings/{id}",
             get(findings::get_finding)
                 .patch(findings::update_finding)
                 .delete(findings::delete_finding),
         )
-        .route("/api/findings/{id}/report", get(findings::get_finding_report))
         .route(
-            "/api/reports",
-            get(reports::list_reports),
+            "/api/findings/{id}/report",
+            get(findings::get_finding_report),
         )
+        .route("/api/reports", get(reports::list_reports))
         .route("/api/reports/count", get(reports::report_count))
         .route("/api/reports/{id}", get(reports::get_report))
-        .route(
-            "/api/quarantine",
-            get(quarantine::list_quarantine),
-        )
+        .route("/api/quarantine", get(quarantine::list_quarantine))
         .route(
             "/api/quarantine/{id}",
             get(quarantine::get_quarantine).delete(quarantine::delete_quarantine),
@@ -127,6 +130,16 @@ pub fn router(
         )
         .route("/api/stats", get(stats::get_stats))
         .route("/api/audit-log", get(audit::list_audit_entries))
+        .route(
+            "/api/rules",
+            get(rules::list_rules).post(rules::create_rule),
+        )
+        .route("/api/rules/test", post(rules::test_rule))
+        .route(
+            "/api/rules/{name}",
+            get(rules::get_rule).delete(rules::delete_rule),
+        )
+        .route("/api/rules/{name}/enable", patch(rules::set_rule_enabled))
         .with_state(state)
         .layer(cors)
 }

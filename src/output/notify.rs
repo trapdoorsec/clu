@@ -76,18 +76,22 @@ fn format_notification(report: &AnalysisReport) -> String {
             lines.push(format!("  typosquat: {}", t.evidence));
         }
     }
-    if let Some(ref gd) = report.guarddog_result {
-        for f in &gd.findings {
+    if let Some(ref yara) = report.yara_result {
+        for f in &yara.findings {
             lines.push(format!(
-                "  guarddog: {} [{}] — {}",
+                "  yara: {} [{}] — {}",
                 f.rule_name, f.severity, f.description
             ));
         }
     }
     if let Some(ref llm) = report.llm_analysis
-        && llm.is_malicious
+        && llm.is_malicious()
     {
-        lines.push(format!("  llm: MALICIOUS — {}", llm.reasoning));
+        let conflicted_marker = if llm.conflicted { " [CONFLICTED]" } else { "" };
+        lines.push(format!(
+            "  llm: MALICIOUS{} — {}",
+            conflicted_marker, llm.reasoning
+        ));
     }
 
     lines.join("\n")

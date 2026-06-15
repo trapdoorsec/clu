@@ -41,23 +41,27 @@ impl Formatter for TextFormatter {
             }
         }
 
-        if let Some(guarddog) = &report.guarddog_result
-            && !guarddog.findings.is_empty()
+        if let Some(yara) = &report.yara_result
+            && !yara.findings.is_empty()
         {
-            for finding in &guarddog.findings {
+            for finding in &yara.findings {
                 findings_count += 1;
                 output.push_str(&format!(
-                    "  GUARDDOG: {} [{}] - {}\n",
+                    "  YARA: {} [{}] - {}\n",
                     finding.rule_name, finding.severity, finding.description
                 ));
             }
         }
 
         if let Some(llm) = &report.llm_analysis
-            && llm.is_malicious
+            && llm.is_malicious()
         {
             findings_count += 1;
-            output.push_str(&format!("  LLM: MALICIOUS - {}\n", llm.reasoning));
+            let conflicted_marker = if llm.conflicted { " [CONFLICTED]" } else { "" };
+            output.push_str(&format!(
+                "  LLM: MALICIOUS{} - {}\n",
+                conflicted_marker, llm.reasoning
+            ));
         }
 
         if findings_count == 0 {
@@ -84,7 +88,7 @@ mod tests {
             sha256: "abc123".to_string(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity: 5,

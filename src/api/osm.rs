@@ -53,7 +53,7 @@ pub struct ReportedTo {
 pub struct ScanEvidence {
     pub heuristic_matches: Vec<String>,
     pub typosquat_matches: Vec<String>,
-    pub guarddog_findings: Option<Vec<String>>,
+    pub yara_findings: Option<Vec<String>>,
     pub llm_assessment: Option<String>,
     pub recommendation: Option<String>,
 }
@@ -85,8 +85,8 @@ pub fn to_osm_report(
             .iter()
             .map(|t| t.evidence.clone())
             .collect(),
-        guarddog_findings: r.guarddog_result.as_ref().map(|g| {
-            g.findings
+        yara_findings: r.yara_result.as_ref().map(|y| {
+            y.findings
                 .iter()
                 .map(|f| format!("{}: {}", f.rule_name, f.description))
                 .collect()

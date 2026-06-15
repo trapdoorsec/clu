@@ -151,7 +151,7 @@ pub async fn get_quarantine(
                     sha256: report.sha256,
                     heuristic_matches: report.heuristic_matches,
                     typosquat_matches: report.typosquat_matches,
-                    guarddog_result: report.guarddog_result,
+                    yara_result: report.yara_result,
                     injection_detection: report.injection_detection,
                     llm_analysis: report.llm_analysis,
                     severity: report.severity,
@@ -257,18 +257,14 @@ pub async fn download_archive(
         .await
         .map_err(|e| AppError::NotFound(format!("archive file not found: {}", e)))?;
 
-    let content_disposition =
-        format!("attachment; filename=\"{}\"", filename);
+    let content_disposition = format!("attachment; filename=\"{}\"", filename);
 
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_DISPOSITION, content_disposition)
         .header("x-content-type-options", "nosniff")
-        .header(
-            header::CONTENT_SECURITY_POLICY,
-            "default-src 'none'",
-        )
+        .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
         .body(Body::from(data))
         .map_err(|e| AppError::Internal(Box::new(e)))
 }

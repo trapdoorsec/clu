@@ -654,13 +654,13 @@ async fn analyze_package(
             .await;
     }
 
-    // Determine if we need to download package for GuardDog and LLM
-    let guarddog_enabled = is_stage_enabled(pipeline_config.map(|p| p.guarddog));
+    // Determine if we need to download package for YARA and LLM
+    let yara_enabled = is_stage_enabled(pipeline_config.map(|p| p.yara));
     let llm_enabled = is_stage_enabled(pipeline_config.map(|p| p.llm));
     let _quarantine_enabled = config.map(|c| c.quarantine.enabled).unwrap_or(false);
 
-    // Try to download package for GuardDog, LLM, or quarantine
-    let downloaded = if guarddog_enabled || llm_enabled {
+    // Try to download package for YARA, LLM, or quarantine
+    let downloaded = if yara_enabled || llm_enabled {
         let extraction_config = config::ExtractionConfig::default();
         match analysis::package::download_and_extract_full(package_name, None, &extraction_config)
             .await
@@ -692,15 +692,14 @@ async fn analyze_package(
                 sha256: d.contents.sha256.clone(),
             });
 
-    // Run GuardDog stage
-    if guarddog_enabled && let Some(db) = database {
+    // Run YARA stage
+    if yara_enabled && let Some(db) = database {
         let _ = db
-            .update_package_status(package_name, db::PackageStatus::GuardDog, None)
+            .update_package_status(package_name, db::PackageStatus::Yara, None)
             .await;
     }
 
-    let guarddog_result =
-        run_guarddog_stage(package_name, &package_contents, guarddog_enabled).await;
+    let yara_result = run_yara_stage(package_name, &package_contents, config, yara_enabled).await;
 
     // Run LLM stage last - it aggregates all findings
     let llm_analysis = if llm_enabled {
@@ -715,7 +714,7 @@ async fn analyze_package(
             &package_contents,
             &heuristic_matches,
             &typosquat_matches,
-            &guarddog_result,
+            &yara_result,
             llm_enabled,
         )
         .await
@@ -723,26 +722,28 @@ async fn analyze_package(
         None
     };
 
-    // Compute static floor from non-manipulable tiers (heuristics + typosquat + GuardDog).
-    // The LLM can escalate but NEVER de-escalate below this floor, because an LLM
-    // evaluating attacker-controlled text is inherently injectable.
-    //
-    // Severity is computed from risk_score sums rather than raw finding counts,
-    // so a single low-signal finding (e.g. missing_author at 30) doesn't inflate
-    // severity as much as a high-signal one (e.g. eval_base64 at 90).
+    // Compute static floor from non-manipulable tiers (heuristics + typosquat + YARA).
+    // The LLM can escalate but NEVER de-escalate below this floor.
     let heuristic_risk: u32 = heuristic_matches.iter().map(|m| m.risk_score as u32).sum();
     let typosquat_risk: u32 = typosquat_matches.iter().map(|m| m.risk_score as u32).sum();
-    let guarddog_risk: u32 = guarddog_result.as_ref().map(|g| g.risk_score as u32).unwrap_or(0);
+    let yara_risk: u32 = yara_result
+        .as_ref()
+        .map(|y| y.risk_score as u32)
+        .unwrap_or(0);
 
     let (static_severity, static_is_malicious, _static_risk) =
-        analysis::compute_static_severity(heuristic_risk, typosquat_risk, guarddog_risk);
+        analysis::compute_static_severity(heuristic_risk, typosquat_risk, yara_risk);
 
     // Merge: LLM can escalate but never de-escalate below the static floor.
-    // is_malicious = OR of LLM and static (either flag is definitive).
-    // severity = MAX of LLM and static (worst case wins).
     let (severity, is_malicious) = if let Some(ref llm) = llm_analysis {
+        if llm.conflicted {
+            log::warn!(
+                "LLM result for {} is conflicted (fields contradict), treating with reduced confidence",
+                package_name
+            );
+        }
         let merged_severity = llm.severity.max(static_severity);
-        let merged_is_malicious = llm.is_malicious || static_is_malicious;
+        let merged_is_malicious = llm.is_malicious() || static_is_malicious;
         (merged_severity, merged_is_malicious)
     } else {
         (static_severity, static_is_malicious)
@@ -763,7 +764,7 @@ async fn analyze_package(
         sha256,
         heuristic_matches,
         typosquat_matches,
-        guarddog_result,
+        yara_result,
         injection_detection: None,
         llm_analysis,
         severity,
@@ -851,27 +852,55 @@ async fn run_typosquat_stage(
     }
 }
 
-/// Stage 3: GuardDog Analysis
-async fn run_guarddog_stage(
+/// Stage 3: YARA Analysis
+async fn run_yara_stage(
     package_name: &str,
-    _package_contents: &Option<analysis::package::PackageContents>,
+    package_contents: &Option<analysis::package::PackageContents>,
+    config: Option<&Config>,
     enabled: bool,
-) -> Option<output::GuardDogResult> {
+) -> Option<output::YaraScanResult> {
     use owo_colors::OwoColorize;
 
     if !enabled {
         return None;
     }
 
-    log::debug!("Stage 3: Starting GuardDog analysis for {}", package_name);
-    match analysis::guarddog::analyze_with_guarddog(package_name, None).await {
-        Ok(result) => {
-            log::debug!("Stage 3: GuardDog analysis completed for {}", package_name);
-            Some(result)
-        }
+    log::debug!("Stage 3: Starting YARA analysis for {}", package_name);
+
+    let contents = package_contents.as_ref()?;
+    let default_yara_config = config::YaraConfig::default();
+    let yara_config = config.map(|c| &c.yara).unwrap_or(&default_yara_config);
+
+    let files: Vec<(String, String)> = contents
+        .files
+        .iter()
+        .map(|f| {
+            (
+                f.relative_path.to_string_lossy().into_owned(),
+                f.contents.clone(),
+            )
+        })
+        .collect();
+
+    match analysis::yara::YaraEngine::new(yara_config) {
+        Ok(engine) => match engine.scan_package(&files, contents.ecosystem, yara_config) {
+            Ok(result) => {
+                log::debug!("Stage 3: YARA analysis completed for {}", package_name);
+                Some(result)
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} Stage 3: YARA analysis failed for {}: {}",
+                    "[!]".yellow(),
+                    package_name.yellow(),
+                    e
+                );
+                None
+            }
+        },
         Err(e) => {
             eprintln!(
-                "{} Stage 3: GuardDog analysis failed for {}: {}",
+                "{} Stage 3: YARA engine init failed for {}: {}",
                 "[!]".yellow(),
                 package_name.yellow(),
                 e
@@ -888,7 +917,7 @@ async fn run_llm_stage(
     package_contents: &Option<analysis::package::PackageContents>,
     heuristic_matches: &[output::HeuristicMatch],
     typosquat_matches: &[output::TypoSquatterMatch],
-    guarddog_result: &Option<output::GuardDogResult>,
+    yara_result: &Option<output::YaraScanResult>,
     enabled: bool,
 ) -> Option<output::LlmAnalysisResult> {
     use owo_colors::OwoColorize;
@@ -927,10 +956,10 @@ async fn run_llm_stage(
             .map(|t| t.evidence.clone())
             .collect();
 
-        let guarddog_findings: Vec<String> = guarddog_result
+        let yara_findings: Vec<String> = yara_result
             .as_ref()
-            .map(|g| {
-                g.findings
+            .map(|y| {
+                y.findings
                     .iter()
                     .map(|f| format!("{} [{}]: {}", f.rule_name, f.severity, f.description))
                     .collect()
@@ -946,7 +975,7 @@ async fn run_llm_stage(
             &source_code,
             &heuristic_findings,
             &typosquat_findings,
-            &guarddog_findings,
+            &yara_findings,
         );
 
         // Check for prompt injection first (sentinel checks the SAME body)
@@ -1070,7 +1099,7 @@ fn print_banner() {
 
               Features;-
               - heuristic analysis
-              - guarddog rules
+              - YARA rules
               - LLM code analysis
     "#;
 

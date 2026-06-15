@@ -311,7 +311,7 @@ mod tests {
             sha256: "abc123".to_string(),
             heuristic_matches: vec![],
             typosquat_matches: vec![],
-            guarddog_result: None,
+            yara_result: None,
             injection_detection: None,
             llm_analysis: None,
             severity,

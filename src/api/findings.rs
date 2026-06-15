@@ -176,8 +176,7 @@ pub async fn list_findings(
         .await
         .map_err(AppError::Internal)?;
 
-    let items: Vec<FindingResponse> =
-        findings.into_iter().map(FindingResponse::from).collect();
+    let items: Vec<FindingResponse> = findings.into_iter().map(FindingResponse::from).collect();
 
     Ok(Json(ListResponse {
         items,
@@ -217,11 +216,7 @@ pub async fn update_finding(
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
     require_auth(auth, &state.token, &state.listen_addr)?;
 
-    let old_finding = state
-        .db
-        .get_finding(id)
-        .await
-        .map_err(AppError::Internal)?;
+    let old_finding = state.db.get_finding(id).await.map_err(AppError::Internal)?;
 
     let status = body
         .status

@@ -146,9 +146,8 @@ impl Database {
         &self,
         filters: &QuarantineFilters,
     ) -> Result<i64, Box<dyn Error>> {
-        let mut query = String::from(
-            "SELECT COUNT(*) as count FROM quarantined_packages WHERE 1=1",
-        );
+        let mut query =
+            String::from("SELECT COUNT(*) as count FROM quarantined_packages WHERE 1=1");
         let mut bindings: Vec<String> = Vec::new();
 
         if let Some(ref eco) = filters.ecosystem {
@@ -178,10 +177,7 @@ impl Database {
         Ok(count)
     }
 
-    pub async fn delete_quarantined_package(
-        &self,
-        id: i64,
-    ) -> Result<bool, Box<dyn Error>> {
+    pub async fn delete_quarantined_package(&self, id: i64) -> Result<bool, Box<dyn Error>> {
         let result = sqlx::query("DELETE FROM quarantined_packages WHERE id = ?")
             .bind(id)
             .execute(&self.pool)

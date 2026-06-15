@@ -1,10 +1,6 @@
 //! Stats aggregation endpoint for the dashboard.
 
-use axum::{
-    Json,
-    extract::State,
-    http::HeaderMap,
-};
+use axum::{Json, extract::State, http::HeaderMap};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{AppError, AppState, require_auth};

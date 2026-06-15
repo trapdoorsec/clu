@@ -18,7 +18,7 @@ struct ConfigValues {
     enable_tui: bool,
     heuristics_enabled: bool,
     typosquat_enabled: bool,
-    guarddog_enabled: bool,
+    yara_enabled: bool,
     llm_enabled: bool,
     quarantine_enabled: bool,
     quarantine_dir: String,
@@ -153,7 +153,7 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
     println!("Configure caching for package downloads.\n");
 
     let pip_cache_dir: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Pip package cache directory (used by GuardDog and LLM)")
+        .with_prompt("Pip package cache directory (used by LLM)")
         .default("/tmp/pip-cache".to_string())
         .interact_text()?;
 
@@ -197,8 +197,8 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         .default(true)
         .interact()?;
 
-    let guarddog_enabled = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Enable GuardDog (pattern-based code analysis)")
+    let yara_enabled = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enable YARA rules (pattern-based code analysis)")
         .default(false)
         .interact()?;
 
@@ -404,7 +404,9 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
 
         let token = if set_token {
             let tok: String = Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("API Bearer token (clients must send this in the Authorization header)")
+                .with_prompt(
+                    "API Bearer token (clients must send this in the Authorization header)",
+                )
                 .default(format!("clu-{}", rand::random::<u64>().to_string()))
                 .interact_text()?;
             Some(tok)
@@ -442,7 +444,7 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
         enable_tui,
         heuristics_enabled,
         typosquat_enabled,
-        guarddog_enabled,
+        yara_enabled,
         llm_enabled,
         quarantine_enabled,
         quarantine_dir,
@@ -538,7 +540,7 @@ model = "{}"
 request_timeout = {}
 
 [cache]
-# Directory for caching pip packages (used by GuardDog and LLM)
+# Directory for caching pip packages (used by LLM)
 # Allows reusing packages across analysis stages to avoid redundant downloads
 pip_cache_dir = "{}"
 
@@ -565,8 +567,8 @@ heuristics = {}
 # Enable typosquat detection based on Levenshtein distance
 typosquat = {}
 
-# Enable GuardDog pattern-based code analysis (requires download)
-guarddog = {}
+# Enable YARA pattern-based code analysis (requires download)
+yara = {}
 
 # Enable LLM semantic code analysis (requires download, slower)
 llm = {}
@@ -634,7 +636,7 @@ url = "{}"
         config.enable_tui,
         config.heuristics_enabled,
         config.typosquat_enabled,
-        config.guarddog_enabled,
+        config.yara_enabled,
         config.llm_enabled,
         config.quarantine_enabled,
         config.quarantine_dir,
@@ -705,7 +707,7 @@ mod tests {
             enable_tui: true,
             heuristics_enabled: true,
             typosquat_enabled: true,
-            guarddog_enabled: true,
+            yara_enabled: true,
             llm_enabled: true,
             quarantine_enabled: true,
             quarantine_dir: "/tmp/clu-quarantine".to_string(),
@@ -731,7 +733,7 @@ mod tests {
         assert!(toml.contains("log_level = \"info\""));
         assert!(toml.contains("heuristics = true"));
         assert!(toml.contains("typosquat = true"));
-        assert!(toml.contains("guarddog = true"));
+        assert!(toml.contains("yara = true"));
         assert!(toml.contains("llm = true"));
         assert!(toml.contains("[notifications]"));
         assert!(toml.contains("enabled = true"));
@@ -764,7 +766,7 @@ mod tests {
             enable_tui: false,
             heuristics_enabled: true,
             typosquat_enabled: true,
-            guarddog_enabled: false,
+            yara_enabled: false,
             llm_enabled: false,
             quarantine_enabled: false,
             quarantine_dir: "/tmp/clu-quarantine".to_string(),
@@ -789,7 +791,7 @@ mod tests {
         assert!(toml.contains("check_updates = true"));
         assert!(toml.contains("enable_tui = false"));
         assert!(toml.contains("typosquat = true"));
-        assert!(toml.contains("guarddog = false"));
+        assert!(toml.contains("yara = false"));
         assert!(toml.contains("llm = false"));
         assert!(toml.contains("[notifications]"));
         assert!(toml.contains("enabled = false"));
@@ -820,7 +822,7 @@ mod tests {
             enable_tui: true,
             heuristics_enabled: true,
             typosquat_enabled: true,
-            guarddog_enabled: false,
+            yara_enabled: false,
             llm_enabled: false,
             quarantine_enabled: true,
             quarantine_dir: "/tmp/clu-quarantine".to_string(),
@@ -844,7 +846,11 @@ mod tests {
 
         assert!(toml.contains("[notifications]"));
         assert!(toml.contains("enabled = true"));
-        assert!(toml.contains("discord_webhook = \"https://discord.com/api/webhooks/123456789/abcdef\""));
+        assert!(
+            toml.contains(
+                "discord_webhook = \"https://discord.com/api/webhooks/123456789/abcdef\""
+            )
+        );
         assert!(toml.contains("# slack_webhook ="));
         assert!(toml.contains("# generic_webhook ="));
         assert!(toml.contains("min_severity = 13"));

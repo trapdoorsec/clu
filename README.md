@@ -477,7 +477,9 @@ Typosquat Matches:
     Evidence: Package 'requestss' is 1 character(s) away from 'requests'
 
 LLM Analysis:
-  Verdict: MALICIOUS
+  Impact: HIGH (4)
+  Likelihood: VERY_LIKELY (4)
+  Severity: 16 (MALICIOUS)
   Reasoning: Contains credential harvesting code
   Confidence: 95.2%
 
@@ -749,4 +751,4 @@ MIT
 
 ---
 
-*Last Updated: 2026-06-13*
+*Last Updated: 2026-06-15*

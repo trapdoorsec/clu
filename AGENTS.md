@@ -142,11 +142,14 @@ CLU processes packages through a configurable pipeline with four analysis stages
 - Medium speed (~100ms), enabled by default
 - Risk scaling: distance 1 char = 90 risk, distance 2 = 75, etc.
 
-**Stage 3: GuardDog** (`src/analysis/guarddog.rs`)
-- Pattern-based code scanning via external `guarddog` CLI subprocess
-- Spawns `guarddog pypi scan` with 60s timeout, parses 3 JSON formats
-- Requires package download + extraction
-- Disabled by default (slow)
+**Stage 3: YARA** (`src/analysis/yara.rs`)
+- Native Rust pattern-based code scanning using `yara-x` crate
+- Rules loaded from `config/yara_rules/builtin/` (immutable) and `config/yara_rules/custom/` (user-defined)
+- Rule metadata parsed from YARA meta fields: severity, description, ecosystem, risk_score
+- Ecosystem filtering: rules with `meta.ecosystem = "pypi"` only match PyPI packages
+- Hot-reload on filesystem changes and API mutations
+- Disabled by default (enable with `[pipeline] yara = true`)
+- API endpoints for CRUD, enable/disable, and rule testing
 
 **Stage 4: LLM Analysis** (`src/analysis/llm.rs`)
 - Semantic analysis via Ollama (qwen2.5-coder)
@@ -154,6 +157,10 @@ CLU processes packages through a configurable pipeline with four analysis stages
 - Disabled by default (very slow)
 - Includes prompt injection detection sentinel
 - Ollama model checking in `analysis/ollama_utils.rs`
+- `is_malicious` is **derived from severity** (`severity >= 6`), not parsed from the LLM response
+- Consistency gate detects contradictions between structured fields and free-text reasoning
+- Conflicted results are flagged with `conflicted=true` and confidence is halved
+- Unparseable responses are discarded (severity=0, confidence=25, conflicted=true)
 
 ### Critical Data Structures
 
@@ -170,12 +177,14 @@ pub struct AnalysisReport {
     pub heuristic_matches: Vec<HeuristicMatch>,
     pub typosquat_matches: Vec<TypoSquatterMatch>,
 
-    // Tier 2: LLM
+    // Tier 2: YARA
+    pub yara_result: Option<YaraScanResult>,
+
+    // Tier 3: LLM
     pub injection_detection: Option<PromptInjectionDetection>,
     pub llm_analysis: Option<LlmAnalysisResult>,
 
-    // Tier 3: GuardDog
-    pub guarddog_result: Option<GuardDogResult>,
+    // Summary
 
     // Summary
     pub severity: u8,    // 1-25 (risk-weighted: static_risk / 10)
@@ -185,11 +194,15 @@ pub struct AnalysisReport {
 
 // LLM semantic analysis result (src/analysis/llm.rs)
 pub struct LlmAnalysisResult {
-    pub is_malicious: bool,
-    pub risk_score: u8,
-    pub reasoning: String,
-    pub confidence: f32,
+    pub impact: ImpactLevel,       // NONE(1)…CRITICAL(5)
+    pub likelihood: LikelihoodLevel, // NONE(1)…IMMINENT(5)
+    pub severity: u8,               // impact * likelihood (1-25)
+    pub reasoning: String,          // free-text explanation from LLM
+    pub confidence: f32,            // 0-100, halved if conflicted
+    pub conflicted: bool,          // true if LLM response contradicts itself
 }
+// is_malicious is derived: severity >= 6
+// JSON serialization includes "is_malicious" computed field for API compatibility
 
 // Prompt injection detection (src/analysis/llm.rs)
 pub struct PromptInjectionDetection {
@@ -217,9 +230,9 @@ Static severity is computed from risk-score sums rather than raw finding counts.
 ```
 heuristic_risk = sum of all HeuristicMatch.risk_score
 typosquat_risk = sum of all TypoSquatterMatch.risk_score
-guarddog_risk  = GuardDogResult.risk_score
+yara_risk      = YaraScanResult.risk_score
 
-static_risk  = heuristic_risk + typosquat_risk + guarddog_risk
+static_risk  = heuristic_risk + typosquat_risk + yara_risk
 severity     = max(1, min(25, static_risk / 10))   if static_risk > 0, else 1
 is_malicious = static_risk >= 70
 ```
@@ -231,7 +244,9 @@ Key implications:
 - `missing_author` + `missing_description` (30+35=65) → severity 6 → **INSPECT**
 - typosquat distance 1 (risk_score=90) → severity 9 → **INSPECT**
 
-The LLM can escalate but NEVER de-escalate below the static floor. Final severity = `max(llm.severity, static_severity)`. Final `is_malicious` = `llm.is_malicious OR static_is_malicious`.
+The LLM can escalate but NEVER de-escalate below the static floor. Final severity = `max(llm.severity, static_severity)`. Final `is_malicious` = `llm.is_malicious() OR static_is_malicious` (where `llm.is_malicious()` = `llm.severity >= 6`).
+
+If the LLM result is `conflicted=true` (structured fields contradict free-text reasoning), confidence is halved but the severity still contributes to the floor. A warning is logged for triage.
 
 Recommendations: severity 0-4 → "IGNORE", severity 5+ → "INSPECT"
 
@@ -242,8 +257,9 @@ Located in `config.toml`:
 - `[llm]` - Ollama endpoint, model name, request timeout
 - `[analysis]` - Thresholds (typosquat distance, min package length)
 - `[output]` - Log level, TUI enable, webhook URL
-- `[cache]` - Pip package cache directory (used by GuardDog and LLM)
-- `[pipeline]` - Boolean flags for enabling/disabling each stage (heuristics, typosquat, guarddog, llm)
+- `[cache]` - Pip package cache directory (used by LLM)
+- `[pipeline]` - Boolean flags for enabling/disabling each stage (heuristics, typosquat, yara, llm)
+- `[yara]` - YARA rules directory, max file size, timeout
 - `[database]` - SQLite URL, enable/disable
 - `[extraction]` - In-memory limits (max_total_bytes, max_file_bytes, max_entries)
 - `[ecosystems]` - Per-ecosystem toggles (pypi_enabled, npm_enabled)
@@ -295,7 +311,7 @@ Located in `src/api/`:
 - `metrics.rs` - `GET /metrics` Prometheus exposition
 - `osm.rs` - OpenSourceMalware report export
 - `audit.rs` - Audit log handlers for tracking user actions
-- `quarantine.rs` - Quarantine management handlers including package quarantine and unquarantine operations
+- `rules.rs` - YARA rules CRUD, enable/disable, test endpoints
 
 ### Module Map
 
@@ -309,8 +325,8 @@ src/
 │   ├── mod.rs      # Pipeline orchestration (analyze_package function)
 │   ├── heuristics.rs
 │   ├── typosquat.rs
-│   ├── guarddog.rs
-│   ├── llm.rs
+│   ├── yara.rs     # YARA scanning engine (yara-x crate, rule management)
+│   ├── llm.rs      # LLM analysis with consistency gate (is_malicious derived from severity)
 │   ├── package.rs  # Package download, in-memory extraction, sha256, source bundles
 │   └── ollama_utils.rs # Ollama model checking and pulling
 ├── api/            # Sidecar REST API (clu-api binary)
@@ -320,7 +336,8 @@ src/
 │   ├── metrics.rs  # GET /metrics (Prometheus)
 │   ├── osm.rs      # OpenSourceMalware report export
 │   ├── audit.rs    # Audit log handlers for tracking user actions
-│   └── quarantine.rs # Quarantine management handlers
+│   ├── quarantine.rs # Quarantine management handlers
+│   └── rules.rs    # YARA rules CRUD, enable/disable, test
 ├── bin/
 │   └── clu-api.rs  # Sidecar binary: load config, open DB (WAL), serve axum
 ├── cli/            # Command-line interface
@@ -347,17 +364,20 @@ src/
 │       ├── json.rs
 │       └── text.rs
 └── config/        # Configuration parsing
-    └── mod.rs     # Config, PipelineConfig, CacheConfig, SidecarConfig, NotificationsConfig structs
+    └── mod.rs     # Config, PipelineConfig, CacheConfig, SidecarConfig, NotificationsConfig, YaraConfig
 
 config/             # Runtime config files (not in version control)
 ├── config.toml
 ├── heuristics.toml
+├── yara_rules/      # YARA rule definitions
+│   ├── builtin/    # Immutable built-in rules (shipped with CLU)
+│   └── custom/     # User-defined rules (CRUD via API)
 └── data/           # Runtime state (cache, etc.)
 ```
 
 ## Development Guidelines
 
-### Package Download & Extraction (For GuardDog/LLM)
+### Package Download & Extraction (For YARA/LLM)
 
 Package download and extraction logic is centralized in `src/analysis/package.rs` (`PackageContents` struct):
 1. Downloads `.tar.gz` or `.whl` directly from PyPI via `reqwest` (no pip cache, no disk writes)
@@ -381,7 +401,7 @@ Rules are loaded dynamically from `heuristics.toml`:
 
 When modifying analysis stages, remember:
 - Heuristics & Typosquat scores are divided by 2 before aggregation
-- This prevents Stage 1 findings from dominating GuardDog/LLM results
+- This prevents Stage 1 findings from dominating YARA/LLM results
 - Final score is capped at 100
 - Modify the scaling in `analyze_package()` if changing tier weights
 
@@ -411,6 +431,7 @@ All I/O operations use Tokio (async/await). Key functions:
 - Both `clu` (scanner) and `clu-api` (sidecar) share one SQLite database file
 - WAL mode is enabled per-connection via `SqliteConnectOptions`; foreign keys are enforced
 - `analysis_reports` table: immutable scan evidence, including `ecosystem` and `sha256` columns
+- Database migration renames `guarddog_result` → `yara_result` in stored JSON and `guarddog` → `yara` in package_status
 - `findings` table: mutable triage state linked to `analysis_reports(id)` via `report_id` FK
 - Scanner writes `analysis_reports` + `package_status`; API writes `findings`
 - The scanner also POSTs to the sidecar when `[sidecar] endpoint` is configured
@@ -445,9 +466,12 @@ Most functions return `Result<T, Box<dyn std::error::Error>>`. Errors are logged
 
 ## Incomplete Features (TODOs)
 
-1. **GuardDog integration** - Pattern-based code scanning (disabled by default)
-   - Semgrep rule integration needs completion
-   - Currently spawns external `guarddog` CLI; could benefit from native Semgrep integration
+1. **YARA rules management** - Pattern-based code scanning via native Rust (disabled by default)
+   - Built-in rules in `config/yara_rules/builtin/` are immutable via API
+   - Custom rules in `config/yara_rules/custom/` can be CRUD'd via API
+   - Rule metadata parsed from YARA meta fields (severity, description, ecosystem, risk_score)
+   - Ecosystem filtering reduces false positives (rules with `meta.ecosystem = "pypi"` only match PyPI)
+   - API endpoints: `GET/POST /api/rules`, `PATCH /api/rules/{name}/enable`, `POST /api/rules/test`
 
 2. **LLM code extraction & analysis** - Semantic analysis via Ollama (disabled by default)
    - Package extraction implemented in `analysis/package.rs`

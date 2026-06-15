@@ -107,7 +107,7 @@ export interface ReportDetail {
   sha256: string;
   heuristic_matches: unknown[];
   typosquat_matches: unknown[];
-  guarddog_result: unknown | null;
+  yara_result: unknown | null;
   injection_detection: unknown | null;
   llm_analysis: unknown | null;
   severity: number;
@@ -156,4 +156,33 @@ export interface AuditFilters {
   since?: string;
   limit?: number;
   offset?: number;
+}
+
+export interface YaraRule {
+  name: string;
+  severity: string;
+  description: string;
+  ecosystem: string;
+  risk_score: number;
+  enabled: boolean;
+  source: string;
+}
+
+export interface YaraRulesListResponse {
+  rules: YaraRule[];
+  total: number;
+}
+
+export interface CreateRuleRequest {
+  name: string;
+  content: string;
+}
+
+export interface TestRuleRequest {
+  content: string;
+  test_data: string;
+}
+
+export interface TestRuleResponse {
+  matched_rules: string[];
 }

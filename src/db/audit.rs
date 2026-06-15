@@ -31,10 +31,7 @@ pub struct AuditFilters {
 }
 
 impl Database {
-    pub async fn insert_audit_entry(
-        &self,
-        entry: &AuditEntry,
-    ) -> Result<i64, Box<dyn Error>> {
+    pub async fn insert_audit_entry(&self, entry: &AuditEntry) -> Result<i64, Box<dyn Error>> {
         let now = if entry.timestamp.is_empty() {
             Utc::now().to_rfc3339()
         } else {
@@ -113,13 +110,8 @@ impl Database {
         Ok(entries)
     }
 
-    pub async fn count_audit_entries(
-        &self,
-        filters: &AuditFilters,
-    ) -> Result<i64, Box<dyn Error>> {
-        let mut query = String::from(
-            "SELECT COUNT(*) as count FROM audit_log WHERE 1=1",
-        );
+    pub async fn count_audit_entries(&self, filters: &AuditFilters) -> Result<i64, Box<dyn Error>> {
+        let mut query = String::from("SELECT COUNT(*) as count FROM audit_log WHERE 1=1");
         let mut bindings: Vec<String> = Vec::new();
 
         if let Some(ref action) = filters.action {
@@ -150,9 +142,7 @@ impl Database {
     }
 }
 
-fn row_to_audit_entry(
-    row: sqlx::sqlite::SqliteRow,
-) -> Result<AuditEntry, Box<dyn Error>> {
+fn row_to_audit_entry(row: sqlx::sqlite::SqliteRow) -> Result<AuditEntry, Box<dyn Error>> {
     Ok(AuditEntry {
         id: row.try_get("id")?,
         timestamp: row.try_get("timestamp")?,

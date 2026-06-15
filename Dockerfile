@@ -34,9 +34,6 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
-    python3 \
-    python3-pip \
-    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 -s /bin/bash cluuser && \
@@ -45,16 +42,14 @@ RUN useradd -m -u 1000 -s /bin/bash cluuser && \
 USER cluuser
 WORKDIR /home/cluuser
 
-RUN python3 -m venv /home/cluuser/venv && \
-    /home/cluuser/venv/bin/pip install --no-cache-dir guarddog
-
-ENV PATH="/home/cluuser/venv/bin:${PATH}"
-
 COPY --from=builder --chown=cluuser:cluuser /build/target/release/clu /usr/local/bin/clu
 COPY --from=builder --chown=cluuser:cluuser /build/target/release/clu-api /usr/local/bin/clu-api
 
 # Copy frontend SPA assets into the directory clu-api serves
 COPY --from=frontend --chown=cluuser:cluuser /ui/dist /home/cluuser/ui/dist
+
+# Copy YARA rules
+COPY --chown=cluuser:cluuser config/yara_rules /home/cluuser/config/yara_rules
 
 RUN mkdir -p /home/cluuser/config /home/cluuser/data
 

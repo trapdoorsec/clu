@@ -17,11 +17,19 @@ import {
   checkHealth,
   setToken,
   clearToken,
+  listYaraRules,
+  getYaraRule,
+  createYaraRule,
+  deleteYaraRule,
+  setYaraRuleEnabled,
+  testYaraRule,
   type FindingFilters,
   type PatchFinding,
   type BulkUpdateRequest,
   type AuditFilters,
   type ReportListParams,
+  type CreateRuleRequest,
+  type TestRuleRequest,
 } from "@/api";
 
 export function useFindings(filters: FindingFilters) {
@@ -161,4 +169,52 @@ export function useLogout() {
     clearToken();
     qc.clear();
   };
+}
+
+// ── YARA Rules ──────────────────────────────────────────────────
+
+export function useYaraRules() {
+  return useQuery({
+    queryKey: ["yara-rules"],
+    queryFn: listYaraRules,
+  });
+}
+
+export function useYaraRule(name: string) {
+  return useQuery({
+    queryKey: ["yara-rule", name],
+    queryFn: () => getYaraRule(name),
+    enabled: !!name,
+  });
+}
+
+export function useCreateYaraRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateRuleRequest) => createYaraRule(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["yara-rules"] }),
+  });
+}
+
+export function useDeleteYaraRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => deleteYaraRule(name),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["yara-rules"] }),
+  });
+}
+
+export function useToggleYaraRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
+      setYaraRuleEnabled(name, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["yara-rules"] }),
+  });
+}
+
+export function useTestYaraRule() {
+  return useMutation({
+    mutationFn: (body: TestRuleRequest) => testYaraRule(body),
+  });
 }

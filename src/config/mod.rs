@@ -25,6 +25,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     #[serde(default)]
     pub quarantine: QuarantineConfig,
+    #[serde(default)]
+    pub yara: YaraConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,7 +120,7 @@ fn default_enable_tui() -> bool {
 
 #[derive(Debug, Deserialize)]
 pub struct CacheConfig {
-    /// Directory for caching pip packages (used by GuardDog and LLM)
+    /// Directory for caching pip packages (used by LLM)
     #[serde(default = "default_pip_cache_dir")]
     pub pip_cache_dir: String,
 }
@@ -145,13 +147,18 @@ pub struct PipelineConfig {
     #[serde(default = "default_typosquat")]
     pub typosquat: bool,
 
-    /// Enable GuardDog pattern-based code analysis (requires download)
-    #[serde(default = "default_guarddog")]
-    pub guarddog: bool,
+    /// Enable YARA pattern-based code analysis (requires download)
+    #[serde(default = "default_yara")]
+    pub yara: bool,
 
     /// Enable LLM semantic code analysis (requires download, slower)
     #[serde(default = "default_llm")]
     pub llm: bool,
+
+    /// Backward compat: if user has `guarddog = true` in config, treat as `yara = true`.
+    /// Removed from serialized output; only used during deserialization.
+    #[serde(default, skip_serializing)]
+    pub guarddog: bool,
 }
 
 fn default_heuristics() -> bool {
@@ -162,7 +169,7 @@ fn default_typosquat() -> bool {
     true
 }
 
-fn default_guarddog() -> bool {
+fn default_yara() -> bool {
     false
 }
 
@@ -175,8 +182,38 @@ impl Default for PipelineConfig {
         PipelineConfig {
             heuristics: true,
             typosquat: true,
-            guarddog: false,
+            yara: false,
             llm: false,
+            guarddog: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct YaraConfig {
+    /// Directory containing YARA rules (builtin/ and custom/ subdirectories)
+    #[serde(default = "default_yara_rules_dir")]
+    pub rules_dir: String,
+
+    /// Maximum file size in bytes to scan (default 5MB)
+    #[serde(default)]
+    pub max_file_size: Option<usize>,
+
+    /// Timeout in seconds for YARA scanning (default 10)
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+fn default_yara_rules_dir() -> String {
+    "config/yara_rules".to_string()
+}
+
+impl Default for YaraConfig {
+    fn default() -> Self {
+        YaraConfig {
+            rules_dir: default_yara_rules_dir(),
+            max_file_size: None,
+            timeout_secs: None,
         }
     }
 }
@@ -212,7 +249,14 @@ impl Default for DatabaseConfig {
 impl Config {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        // Backward compat: if old `guarddog = true` is set, enable yara.
+        if config.pipeline.guarddog && !config.pipeline.yara {
+            log::warn!(
+                "Config uses deprecated `[pipeline] guarddog = true`. Please update to `yara = true`."
+            );
+            config.pipeline.yara = true;
+        }
         Ok(config)
     }
 }

@@ -48,3 +48,6 @@ thiserror = "2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
+yara-x = "1.17"
+notify = { version = "7", features = ["macos_fsevent"] }
+parking_lot = "0.12"

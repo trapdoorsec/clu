@@ -8,6 +8,7 @@ import DashboardPage from "./pages/DashboardPage";
 import FindingsPage from "./pages/FindingsPage";
 import ReportsPage from "./pages/ReportsPage";
 import ReportDetailPage from "./pages/ReportDetailPage";
+import RulesPage from "./pages/RulesPage";
 import QuarantinePage from "./pages/QuarantinePage";
 import AuditPage from "./pages/AuditPage";
 import { isAuthenticated } from "./api";
@@ -46,6 +47,7 @@ function App() {
             <Route path="/findings" element={<FindingsPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/reports/:id" element={<ReportDetailPage />} />
+            <Route path="/rules" element={<RulesPage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/audit" element={<AuditPage />} />
           </Route>

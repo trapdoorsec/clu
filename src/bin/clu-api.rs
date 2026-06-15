@@ -64,10 +64,9 @@ async fn main() {
 
     let app = if serve_spa {
         log::info!("Serving SPA frontend from {}", STATIC_DIR);
-        let spa_service = tower_http::services::ServeDir::new(&static_path)
-            .fallback(tower_http::services::ServeFile::new(
-                static_path.join("index.html"),
-            ));
+        let spa_service = tower_http::services::ServeDir::new(&static_path).fallback(
+            tower_http::services::ServeFile::new(static_path.join("index.html")),
+        );
         api_router.fallback_service(spa_service)
     } else {
         log::info!("No SPA directory found at {}, serving API only", STATIC_DIR);
