@@ -8,6 +8,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 See ARCHITECTURE.md for detailed system design.
 
+## New Features
+
+### Web UI
+A new web frontend has been added to CLU providing:
+- Dashboard with overview of findings and statistics
+- Package analysis reports 
+- Finding triage interface
+- Audit logging
+- Quarantine management
+- Login authentication
+
+### Notification Configuration
+Enhanced notification support for:
+- Discord webhooks
+- Slack webhooks  
+- Generic webhooks
+- Startup health-check notifications
+
+### Quarantine Feature
+Package quarantine functionality that allows:
+- Automatic quarantining of suspicious packages
+- Quarantine management through web UI and API endpoints
+- Integration with the sidecar API for triage workflows
+
+### Health-Check Notifications
+Startup notification system that sends a "🟢 CLU startup health-check" message to all configured notification channels when the scanner starts, confirming connectivity before processing any findings.
+
 ## Build & Test Commands
 
 ### Development
@@ -267,6 +294,8 @@ Located in `src/api/`:
 - `health.rs` - `GET /healthz` liveness probe
 - `metrics.rs` - `GET /metrics` Prometheus exposition
 - `osm.rs` - OpenSourceMalware report export
+- `audit.rs` - Audit log handlers for tracking user actions
+- `quarantine.rs` - Quarantine management handlers including package quarantine and unquarantine operations
 
 ### Module Map
 
@@ -289,7 +318,9 @@ src/
 │   ├── findings.rs # Finding CRUD handlers + DTOs
 │   ├── health.rs   # GET /healthz
 │   ├── metrics.rs  # GET /metrics (Prometheus)
-│   └── osm.rs      # OpenSourceMalware report export
+│   ├── osm.rs      # OpenSourceMalware report export
+│   ├── audit.rs    # Audit log handlers for tracking user actions
+│   └── quarantine.rs # Quarantine management handlers
 ├── bin/
 │   └── clu-api.rs  # Sidecar binary: load config, open DB (WAL), serve axum
 ├── cli/            # Command-line interface
@@ -303,6 +334,8 @@ src/
 ├── db/            # SQLite persistence (shared between scanner and API)
 │   ├── mod.rs     # Database struct, analysis_reports, package_status, WAL mode
 │   └── findings.rs # Finding, FindingStatus, FindingFilters, CRUD methods
+│   └── audit.rs   # Audit log database operations
+│   └── quarantine.rs # Quarantine database operations
 ├── output/        # Result formatting
 │   ├── mod.rs     # AnalysisReport (with ecosystem + sha256), Formatter trait
 │   ├── webhook.rs # Scanner → sidecar POST (fire-and-forget)
