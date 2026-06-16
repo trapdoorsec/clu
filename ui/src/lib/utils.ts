@@ -5,10 +5,10 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function severityColor(severity: number): string {
-  if (severity >= 20) return "text-red-400 bg-red-400/10 border-red-400/30";
-  if (severity >= 13) return "text-orange-400 bg-orange-400/10 border-orange-400/30";
-  if (severity >= 5) return "text-yellow-400 bg-yellow-400/10 border-yellow-400/30";
-  return "text-green-400 bg-green-400/10 border-green-400/30";
+  if (severity >= 20) return "text-red-400 bg-red-500/10 border-red-500/20";
+  if (severity >= 13) return "text-orange-400 bg-orange-500/10 border-orange-500/20";
+  if (severity >= 5) return "text-[var(--color-warning)] bg-[var(--color-warning)]/10 border-[var(--color-warning)]/20";
+  return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
 }
 
 export function severityLabel(severity: number): string {
@@ -32,14 +32,14 @@ export function statusLabel(status: string): string {
 
 export function statusColor(status: string): string {
   const m: Record<string, string> = {
-    new: "text-blue-400 bg-blue-400/10",
-    triaging: "text-yellow-400 bg-yellow-400/10",
-    confirmed_malicious: "text-red-400 bg-red-400/10",
-    benign: "text-green-400 bg-green-400/10",
-    reported: "text-purple-400 bg-purple-400/10",
-    duplicate: "text-gray-400 bg-gray-400/10",
+    new: "text-sky-400 bg-sky-500/10",
+    triaging: "text-[var(--color-warning)] bg-[var(--color-warning)]/10",
+    confirmed_malicious: "text-red-400 bg-red-500/10",
+    benign: "text-emerald-400 bg-emerald-500/10",
+    reported: "text-[var(--color-primary)] bg-[var(--color-primary-ghost)]",
+    duplicate: "text-gray-400 bg-gray-500/10",
   };
-  return m[status] ?? "text-gray-400 bg-gray-400/10";
+  return m[status] ?? "text-gray-400 bg-gray-500/10";
 }
 
 export function formatTime(iso: string): string {

@@ -1,39 +1,95 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
+}
+
 :root {
-  --color-bg: #0a0a0f;
-  --color-surface: #13131a;
-  --color-surface-hover: #1a1a24;
-  --color-border: #2a2a3a;
-  --color-text: #e4e4ef;
-  --color-text-muted: #8888a0;
-  --color-primary: #6366f1;
-  --color-primary-hover: #818cf8;
-  --color-danger: #ef4444;
-  --color-warning: #f59e0b;
-  --color-success: #22c55e;
-  --color-info: #3b82f6;
+  --color-bg: #06060a;
+  --color-surface: #0e0e14;
+  --color-surface-hover: #16161e;
+  --color-border: #1e1d26;
+  --color-border-light: #28273a;
+  --color-text: #ece9e1;
+  --color-text-muted: #7c7a6e;
+  --color-text-dim: #4e4d45;
+  --color-primary: #c9a227;
+  --color-primary-hover: #ddb94e;
+  --color-primary-dim: #8a6e18;
+  --color-primary-ghost: rgba(201, 162, 39, 0.08);
+  --color-primary-glow: rgba(201, 162, 39, 0.15);
+  --color-danger: #e84040;
+  --color-danger-dim: rgba(232, 64, 64, 0.12);
+  --color-warning: #e8a820;
+  --color-success: #2ebd5e;
+  --color-info: #5088d0;
+
+  --sidebar-w: 240px;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 a {
   color: var(--color-primary);
   text-decoration: none;
+  transition: color 0.15s ease;
 }
 
 a:hover {
   color: var(--color-primary-hover);
+}
+
+::selection {
+  background: var(--color-primary);
+  color: #000;
+}
+
+input, select, textarea, button {
+  font-family: inherit;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-light);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-dim);
 }
 
 .sr-only {
