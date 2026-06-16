@@ -1,6 +1,6 @@
 # CLU - Containerized Malware Scanner for Python and npm Packages
 
-Malicious PyPI and npm package hunter. Monitors the PyPI and npm feeds for new packages, runs heuristic analysis and LLM-based code review, then validates with GuardDog.
+Malicious PyPI and npm package hunter. Monitors the PyPI and npm feeds for new packages, runs heuristic analysis and LLM-based code review, then validates with YARA pattern-matching rules.
 
 **⚠️ SECURITY NOTE**: This tool analyzes potentially malicious code. Always run inside a container as a non-root user.
 
@@ -14,7 +14,7 @@ Stage 1: Heuristics (fast metadata analysis)
 Stage 2: Typosquat (package name similarity)
     ↓
 [Optionally, if enabled:]
-    ├→ Stage 3: GuardDog (pattern-based code scanning)
+    ├→ Stage 3: YARA (pattern-based code scanning)
     └→ Stage 4: LLM Analysis (semantic AI-based review with injection detection)
     ↓
 Results → Database + Sidecar API + Webhook + Log Aggregator
@@ -25,8 +25,10 @@ Results → Database + Sidecar API + Webhook + Log Aggregator
 - Typosquat: Levenshtein distance against popular packages
 
 **Stage 3 & 4**: Optional (slower, ~seconds each)
-- GuardDog: Pattern-based code scanning (requires guarddog CLI)
+- YARA: Pattern-based code scanning via native Rust `yara-x` crate (no external CLI needed)
 - LLM: Semantic analysis with prompt injection detection (requires Ollama)
+
+> **Note:** GuardDog (the external Python CLI) is **deprecated**. CLU now uses native YARA rules for pattern-based scanning. If you previously enabled `guarddog = true`, the database migrates automatically on startup. See the migration note below.
 
 **Results**: Persisted to SQLite database, queriable via sidecar API, and forwarded to webhook/logging services
 
@@ -271,8 +273,6 @@ Edit `docker-compose.yml` to adjust for your system.
 
 - Rust 1.75+
 - Ollama with qwen2.5-coder or similar
-- GuardDog (`pip install guarddog`)
-- Python 3.9+
 
 ### Build
 
@@ -333,7 +333,8 @@ webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 [pipeline]
 heuristics = true       # Fast metadata rules
 typosquat = true        # Similarity detection
-guarddog = false         # Requires 'guarddog' CLI tool installed
+guarddog = false         # DEPRECATED — use "yara" below; auto-migrated
+yara = false              # Enable Stage 3 (YARA rules)
 llm = false              # Requires Ollama running with model
 
 [database]
@@ -368,7 +369,7 @@ Each analysis stage can be enabled (`true`) or disabled (`false`):
 |-------|-------|---|---|---|
 | **Heuristics** | ~ms | ✅ Yes | None | Fast metadata rules |
 | **Typosquat** | ~100ms | ✅ Yes | Network (external API) | Levenshtein similarity |
-| **GuardDog** | ~1-2s | ❌ No | None (included in Docker) | Pattern-based scanning |
+| **YARA** | ~sub-second | ❌ No | YARA rules (built-in + custom) | Pattern-based scanning (replaces GuardDog) |
 | **LLM** | ~2-5s | ❌ No | Ollama + model | Semantic analysis + injection detection |
 
 **Example Configurations:**
@@ -378,33 +379,39 @@ Each analysis stage can be enabled (`true`) or disabled (`false`):
 [pipeline]
 heuristics = true
 typosquat = true
-guarddog = false
+yara = false
 llm = false
 
-# Balanced (add GuardDog for medium-risk packages)
+# Balanced (add YARA for medium-risk packages)
 [pipeline]
 heuristics = true
 typosquat = true
-guarddog = true
+yara = true
 llm = false
 
 # Maximum (all stages - slowest but most thorough)
 [pipeline]
 heuristics = true
 typosquat = true
-guarddog = true
+yara = true
 llm = true
 ```
 
-**To enable GuardDog:**
+**To enable YARA (replaces GuardDog):**
 ```bash
-# 1. GuardDog is already included in the Docker image
-# (For manual installation: pip install guarddog)
+# 1. YARA rules are included in config/yara_rules/builtin/
+#    Custom rules can be added to config/yara_rules/custom/ or via the API
 
 # 2. Enable in config.toml
 [pipeline]
-guarddog = true
+yara = true
 ```
+
+> **Migration from GuardDog:** If you previously used `guarddog = true`, the database will automatically rename `guarddog_result` → `yara_result` and `guarddog` → `yara` status values on first boot. You will see a log message like:
+> ```
+> Running YARA migration: renaming guarddog_result → yara_result in stored reports
+> ```
+> No manual intervention is required.
 
 **To enable LLM:**
 ```bash
@@ -461,7 +468,7 @@ Analysis Methods:
   [x] Heuristics (2 rules matched)
   [x] Typosquat Detection (1 match)
   [x] LLM Analysis
-  [·] GuardDog (skipped)
+  [·] YARA (skipped)
 
 Risk Level: BLOCK (72)
 Recommendation: BLOCK
@@ -549,18 +556,21 @@ docker-compose ps | grep ollama  # Should show 'healthy'
 docker-compose exec clu curl http://ollama:11434/api/tags
 ```
 
-### GuardDog analysis not running (stage 3)
+### YARA analysis not running (stage 3)
 
 ```bash
-# Check if GuardDog is enabled
-grep "guarddog = " ./config.toml  # Should be 'true'
+# Check if YARA is enabled
+grep "yara = " ./config.toml  # Should be 'true'
 
-# Check guarddog CLI is available
-docker-compose exec clu which guarddog
+# Verify YARA rules are present
+ls -la config/yara_rules/builtin/
+ls -la config/yara_rules/custom/
 
-# Verify guarddog can run
-docker-compose exec clu guarddog --version
+# Check logs for YARA rule loading
+docker-compose logs clu | grep -i yara
 ```
+
+> **Note:** GuardDog (the external CLI scanner) is deprecated. If `guarddog = true` is present in your config, CLU will treat it as `yara = true` and log a migration notice.
 
 ### Out of memory
 
@@ -751,4 +761,4 @@ MIT
 
 ---
 
-*Last Updated: 2026-06-15*
+*Last Updated: 2026-06-16*

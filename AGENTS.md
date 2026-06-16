@@ -225,7 +225,7 @@ pub struct PythonPackage {
 
 Aggregation logic in `src/main.rs` (`analyze_package` function) and `src/analysis/mod.rs` (`compute_static_severity`):
 
-Static severity is computed from risk-score sums rather than raw finding counts. Each heuristic rule, typosquat match, and GuardDog result carries its own `risk_score` (0-100 scale). The total risk is summed across all tiers and divided by 10 to produce a 1-25 severity:
+Static severity is computed from risk-score sums rather than raw finding counts. Each heuristic rule, typosquat match, and YARA rule match carries its own `risk_score` (0-100 scale). The total risk is summed across all tiers and divided by 10 to produce a 1-25 severity:
 
 ```
 heuristic_risk = sum of all HeuristicMatch.risk_score
@@ -431,7 +431,7 @@ All I/O operations use Tokio (async/await). Key functions:
 - Both `clu` (scanner) and `clu-api` (sidecar) share one SQLite database file
 - WAL mode is enabled per-connection via `SqliteConnectOptions`; foreign keys are enforced
 - `analysis_reports` table: immutable scan evidence, including `ecosystem` and `sha256` columns
-- Database migration renames `guarddog_result` → `yara_result` in stored JSON and `guarddog` → `yara` in package_status
+- Database migration renames `guarddog_result` → `yara_result` in stored JSON and `guarddog` → `yara` in package_status. Runs automatically on first boot; log message: `Running YARA migration: renaming guarddog_result → yara_result in stored reports`
 - `findings` table: mutable triage state linked to `analysis_reports(id)` via `report_id` FK
 - Scanner writes `analysis_reports` + `package_status`; API writes `findings`
 - The scanner also POSTs to the sidecar when `[sidecar] endpoint` is configured
@@ -485,4 +485,4 @@ Most functions return `Result<T, Box<dyn std::error::Error>>`. Errors are logged
 
 4. **npm scope 3b+** - Download, extraction, and full analysis pipeline for npm packages
    - Feed + metadata (scope 3a) implemented in `src/feed/npm.rs`
-   - Package download and GuardDog/LLM analysis not yet supported for npm
+   - Package download and YARA/LLM analysis not yet supported for npm

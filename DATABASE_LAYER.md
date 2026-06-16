@@ -45,7 +45,7 @@ Tracks real-time processing status for the live feed feature.
 CREATE TABLE package_status (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     package_name TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL,          -- queued, heuristics, typosquat, guarddog, llm, completed, failed
+    status TEXT NOT NULL,          -- queued, heuristics, typosquat, yara, llm, completed, failed
     current_stage TEXT,
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -161,7 +161,7 @@ pub enum PackageStatus {
     Queued,      // Package queued for analysis
     Heuristics,  // Running heuristic analysis
     Typosquat,   // Running typosquat detection
-    GuardDog,    // Running GuardDog scan
+    Yara,       // Running YARA scan (formerly GuardDog)
     Llm,         // Running LLM analysis
     Completed,   // Analysis complete
     Failed,      // Analysis failed
@@ -193,7 +193,7 @@ The database is automatically integrated into the `watch_feed` pipeline:
 ### Status Flow
 
 ```
-New Package → Queued → Heuristics → Typosquat → (GuardDog) → (LLM) → Completed
+New Package → Queued → Heuristics → Typosquat → (YARA) → (LLM) → Completed
                                                                          ↓
                                                                     (or Failed)
 ```
@@ -236,10 +236,15 @@ All analysis result types support both `Serialize` and `Deserialize` for databas
 - `AnalysisReport` - Complete analysis report
 - `HeuristicMatch` - Heuristic rule matches
 - `TypoSquatterMatch` - Typosquat findings
-- `GuardDogResult` - GuardDog scan results
-- `GuardDogFinding` - Individual GuardDog findings
+- `YaraScanResult` - YARA scan results (replaces former `GuardDogResult`)
+- `YaraRuleMatch` - Individual YARA rule matches (replaces former `GuardDogFinding`)
 - `LlmAnalysisResult` - LLM semantic analysis
 - `PromptInjectionDetection` - LLM injection detection
+
+> **Migration note:** Existing databases storing `guarddog_result` fields are automatically migrated to `yara_result` on first boot. The `package_status` status value `guarddog` is also renamed to `yara`. Example log output:
+> ```
+> Running YARA migration: renaming guarddog_result → yara_result in stored reports
+> ```
 
 ## Testing
 

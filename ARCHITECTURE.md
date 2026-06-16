@@ -30,8 +30,8 @@
            ▼                    ▼                    ▼              ▼
      ┌────────┐          ┌────────┐          ┌────────┐      ┌────────┐
      │Tier 1: │          │Tier 1: │          │Tier 2: │      │Tier 2: │
-     │Heur.   │          │Typo.   │          │Guard   │      │  LLM   │
-     │(fast)  │          │(API)   │          │(slow)  │      │(slow)  │
+     │Heur.   │          │Typo.   │          │YARA    │      │  LLM   │
+     │(fast)  │          │(API)   │          │(rules)  │      │(slow)  │
      └────┬───┘          └────┬───┘          └────┬───┘      └────┬───┘
           │                   │                    │              │
           └───────────────────┼────────────────────┴──────────────┘
@@ -122,19 +122,25 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 
 **Example:** "reqeusts" → similar to "requests" (1 char away) = 90 risk
 
-#### **Stage 3: GuardDog Analysis** (`guarddog.rs`)
-- **Type:** Pattern-based code scanning via external CLI
-- **Speed:** Slow (~seconds, requires package download + GuardDog CLI)
-- **Default:** Disabled
-- **Inputs:** Package source code
-- **Outputs:** Pattern matches with severity levels
+#### **Stage 3: YARA Analysis** (`yara.rs`)
+- **Type:** Pattern-based code scanning using native Rust YARA engine (`yara-x` crate)
+- **Speed:** Medium (~sub-second to seconds, requires package download)
+- **Default:** Disabled (enable with `[pipeline] yara = true`)
+- **Inputs:** Package source code (extracted in-memory)
+- **Outputs:** Rule matches with severity, risk_score, and description
 
 **Implementation:**
-- Spawns `guarddog pypi scan` subprocess with 60s timeout
-- Parses 3 JSON output format variants
-- Requires external `guarddog` CLI binary installed separately
-- Package download & extraction in `analysis/package.rs` (complete)
-- Reports findings with severity and description
+- Rules loaded from `config/yara_rules/builtin/` (immutable) and `config/yara_rules/custom/` (user-defined)
+- Rule metadata parsed from YARA `meta` fields: `severity`, `description`, `ecosystem`, `risk_score`
+- Ecosystem filtering: rules with `meta.ecosystem = "pypi"` only match PyPI packages
+- Hot-reload on filesystem changes and API mutations
+- CRUD API endpoints for custom rule management
+- Package download & extraction in `analysis/package.rs`
+
+> **Deprecation notice:** This stage replaces the former GuardDog analysis (which spawned an external `guarddog` CLI subprocess). Existing databases are migrated automatically on startup: field names `guarddog_result` → `yara_result` and status values `guarddog` → `yara` are rewritten in-place. Example log message:
+> ```
+> Running YARA migration: renaming guarddog_result → yara_result in stored reports
+> ```
 
 #### **Stage 4: LLM Analysis** (`llm.rs`)
 - **Type:** Semantic code analysis via LLM
@@ -187,8 +193,9 @@ pip_cache_dir = "/tmp/pip-cache"  # For storing downloaded packages
 [pipeline]
 heuristics = true    # Enable Stage 1 (default: true)
 typosquat = true     # Enable Stage 2 (default: true)
-guarddog = false     # Enable Stage 3 (default: false)
-llm = false          # Enable Stage 4 (default: false)
+guarddog = false     # DEPRECATED — use "yara" below; migration runs automatically
+yara = false          # Enable Stage 3 (default: false)
+llm = false           # Enable Stage 4 (default: false)
 
 [database]
 url = "sqlite:data/clu.db"
@@ -255,10 +262,10 @@ pub struct AnalysisReport {
     pub typosquat_matches: Vec<TypoSquatterMatch>,
     pub injection_detection: Option<PromptInjectionDetection>,
     pub llm_analysis: Option<LlmAnalysisResult>,
-    pub guarddog_result: Option<GuardDogResult>,
-    pub severity: u8,    // 1-25 (impact * likelihood)
+    pub yara_result: Option<YaraScanResult>,
+    pub severity: u8,    // 1-25 (risk-weighted: static_risk / 10)
     pub is_malicious: bool,
-    pub recommendation: String,  // "SAFE", "REVIEW", "BLOCK"
+    pub recommendation: String,  // "IGNORE", "INSPECT"
 }
 ```
 
@@ -297,9 +304,8 @@ risk_score = min(risk_score, 100)  // Cap at 100
 ```
 
 **Recommendation Tiers:**
-- **0-30:** SAFE (green) - Monitor only
-- **31-70:** REVIEW (yellow) - Investigate recommended
-- **71-100:** BLOCK (red) - High likelihood of malicious code, immediate action required
+- **0-4:** IGNORE (green) - No action needed
+- **5-25:** INSPECT (yellow+) - Investigation warranted
 
 ## Data Flow
 
@@ -321,7 +327,7 @@ risk_score = min(risk_score, 100)  // Cap at 100
             a) Run enabled analysis stages
                ├─ Stage 1: Heuristics (if enabled)
                ├─ Stage 2: Typosquat (if enabled)
-               ├─ Stage 3: GuardDog (if enabled)
+               ├─ Stage 3: YARA (if enabled)
                └─ Stage 4: LLM (if enabled)
 
             b) Aggregate risk scores
@@ -414,7 +420,8 @@ src/
 │   ├── mod.rs          # Analysis orchestration & pipeline
 │   ├── heuristics.rs   # Rule-based metadata analysis
 │   ├── typosquat.rs    # Levenshtein distance matching
-│   ├── guarddog.rs     # External GuardDog CLI scanner
+│   ├── guarddog.rs     # DEPRECATED: former GuardDog CLI scanner (replaced by yara.rs)
+│   ├── yara.rs         # YARA scanning engine (yara-x crate, rule management)
 │   ├── llm.rs          # LLM semantic analysis with injection detection
 │   ├── package.rs      # Package download, in-memory extraction, sha256, source bundles
 │   └── ollama_utils.rs # Ollama model checking and management
@@ -458,15 +465,15 @@ config/
 
 ## Future Enhancements
 
-1. **GuardDog Pattern Matching Completion**
-   - Package download & extraction ✅ (done)
-   - Could benefit from native Semgrep integration instead of external CLI
-   - Risk score mapping based on finding severity
+1. **YARA Pattern Matching Enhancements**
+   - Hot-reload and CRUD API for custom rules ✅ (done)
+   - Could benefit from native Semgrep integration as an alternative
+   - Risk score mapping based on YARA rule metadata
 
 2. **npm Scope 3b+**
    - Feed + metadata (scope 3a) ✅ (done)
    - Package download and extraction for npm packages
-   - GuardDog/LLM analysis for npm packages
+   - YARA/LLM analysis for npm packages
 
 3. **TUI Mode**
    - Minimal implementation exists in `src/output/tui.rs`
@@ -522,4 +529,4 @@ config/
 
 ---
 
-*Last Updated: 2026-06-13*
+*Last Updated: 2026-06-16*

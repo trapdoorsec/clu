@@ -83,11 +83,11 @@ export default function ReportDetailPage() {
           </div>
         )}
 
-        {r.guarddog_result ? (
+        {r.yara_result ? (
           <div className="mt-4">
-            <h3 className="text-sm font-semibold mb-2">GuardDog Result</h3>
+            <h3 className="text-sm font-semibold mb-2">YARA Result</h3>
             <pre className="bg-[var(--color-bg)] p-3 rounded text-xs overflow-x-auto border border-[var(--color-border)]">
-              {JSON.stringify(r.guarddog_result, null, 2)}
+              {JSON.stringify(r.yara_result, null, 2)}
             </pre>
           </div>
         ) : null}
