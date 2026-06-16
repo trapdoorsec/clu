@@ -45,8 +45,8 @@ mod tests {
 
     #[test]
     fn test_severity_missing_author_only() {
-        let (severity, is_malicious, _) = compute_static_severity(30, 0, 0);
-        assert_eq!(severity, 3);
+        let (severity, is_malicious, _) = compute_static_severity(5, 0, 0);
+        assert_eq!(severity, 1);
         assert!(!is_malicious);
     }
 
@@ -73,15 +73,15 @@ mod tests {
 
     #[test]
     fn test_severity_missing_author_plus_description() {
-        let (severity, is_malicious, _) = compute_static_severity(65, 0, 0);
-        assert_eq!(severity, 6);
+        let (severity, is_malicious, _) = compute_static_severity(40, 0, 0);
+        assert_eq!(severity, 4);
         assert!(!is_malicious);
     }
 
     #[test]
     fn test_severity_missing_author_plus_dangerous() {
-        let (severity, is_malicious, _) = compute_static_severity(125, 0, 0);
-        assert_eq!(severity, 12);
+        let (severity, is_malicious, _) = compute_static_severity(100, 0, 0);
+        assert_eq!(severity, 10);
         assert!(is_malicious);
     }
 
@@ -101,8 +101,8 @@ mod tests {
 
     #[test]
     fn test_severity_combined_all_tiers() {
-        let (severity, is_malicious, _) = compute_static_severity(30, 90, 70);
-        assert_eq!(severity, 19);
+        let (severity, is_malicious, _) = compute_static_severity(5, 90, 70);
+        assert_eq!(severity, 16);
         assert!(is_malicious);
     }
 
@@ -136,11 +136,11 @@ mod tests {
 
     #[test]
     fn test_recommendation_thresholds() {
-        let (sev_3, _, _) = compute_static_severity(30, 0, 0);
-        assert!(sev_3 <= 4, "missing_author should be IGNORE");
+        let (sev_1, _, _) = compute_static_severity(5, 0, 0);
+        assert!(sev_1 <= 4, "missing_author (risk=5) should be IGNORE");
 
-        let (sev_6, _, _) = compute_static_severity(65, 0, 0);
-        assert!(sev_6 > 4, "missing_author+description should be INSPECT");
+        let (sev_4, _, _) = compute_static_severity(40, 0, 0);
+        assert!(sev_4 <= 4, "missing_author+description (risk=40) should be IGNORE");
 
         let (sev_9, _, _) = compute_static_severity(90, 0, 0);
         assert!(sev_9 > 4, "eval_base64 alone should be INSPECT");

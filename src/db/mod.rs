@@ -17,6 +17,7 @@ use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::analysis::compute_static_severity;
 use crate::output::AnalysisReport;
 
 /// Database connection pool
@@ -430,6 +431,121 @@ impl Database {
                 .ok();
 
             log::info!("YARA migration complete");
+        }
+
+        // Migration: lower missing_author heuristic risk_score from 30 → 5
+        // Also recalculate severity, is_malicious, and recommendation for affected reports.
+        let ma_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_list WHERE name = 'missing_author_risk_migration_done'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0i64);
+        let ma_done = ma_count > 0;
+
+        if !ma_done {
+            log::info!(
+                "Running missing_author migration: lowering risk_score from 30 to 5 and recalculating severity"
+            );
+
+            let rows = sqlx::query_as::<_, (i64, String, i64, i64, String)>(
+                "SELECT id, report_json, severity, is_malicious, recommendation FROM analysis_reports WHERE report_json LIKE '%missing_author%'"
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+
+            let mut updated = 0u64;
+            let mut skipped = 0u64;
+
+            for (row_id, json, old_sev, old_mal, old_rec) in &rows {
+                match serde_json::from_str::<AnalysisReport>(json) {
+                    Ok(mut report) => {
+                        let mut changed = false;
+                        for m in &mut report.heuristic_matches {
+                            if m.rule_name == "missing_author" && m.risk_score == 30 {
+                                m.risk_score = 5;
+                                changed = true;
+                            }
+                        }
+                        if !changed {
+                            skipped += 1;
+                            continue;
+                        }
+
+                        // Recompute static risk and severity
+                        let hr: u32 = report.heuristic_matches.iter().map(|m| m.risk_score as u32).sum();
+                        let tr: u32 = report.typosquat_matches.iter().map(|m| m.risk_score as u32).sum();
+                        let yr: u32 = report.yara_result.as_ref().map(|y| y.risk_score as u32).unwrap_or(0);
+                        let (static_sev, static_mal, _) = compute_static_severity(hr, tr, yr);
+
+                        // Merge with LLM (LLM can escalate but never de-escalate below static floor)
+                        let (new_sev, new_mal) = if let Some(ref llm) = report.llm_analysis {
+                            let merged_sev = llm.severity.max(static_sev);
+                            let merged_mal = llm.is_malicious() || static_mal;
+                            (merged_sev, merged_mal)
+                        } else {
+                            (static_sev, static_mal)
+                        };
+                        let new_rec = if new_sev <= 4 { "IGNORE" } else { "INSPECT" };
+
+                        report.severity = new_sev;
+                        report.is_malicious = new_mal;
+                        report.recommendation = new_rec.to_string();
+
+                        let new_json = match serde_json::to_string(&report) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                log::warn!("missing_author migration: failed to serialize report id {}: {}", row_id, e);
+                                skipped += 1;
+                                continue;
+                            }
+                        };
+
+                        if let Err(e) = sqlx::query(
+                            "UPDATE analysis_reports SET severity = ?, is_malicious = ?, recommendation = ?, report_json = ? WHERE id = ?"
+                        )
+                        .bind(new_sev as i64)
+                        .bind(if new_mal { 1i64 } else { 0i64 })
+                        .bind(new_rec)
+                        .bind(&new_json)
+                        .bind(row_id)
+                        .execute(&self.pool)
+                        .await
+                        {
+                            log::warn!("missing_author migration: failed to update report id {}: {}", row_id, e);
+                            skipped += 1;
+                            continue;
+                        }
+
+                        // Also update the corresponding findings row severity
+                        let _ = sqlx::query(
+                            "UPDATE findings SET severity = ? WHERE report_id = ?"
+                        )
+                        .bind(new_sev as i64)
+                        .bind(row_id)
+                        .execute(&self.pool)
+                        .await;
+
+                        updated += 1;
+                    }
+                    Err(e) => {
+                        log::warn!("missing_author migration: failed to deserialize report id {}: {}", row_id, e);
+                        skipped += 1;
+                    }
+                }
+            }
+
+            log::info!(
+                "missing_author migration complete: {} reports updated, {} skipped",
+                updated,
+                skipped
+            );
+
+            sqlx::query("CREATE TABLE IF NOT EXISTS missing_author_risk_migration_done (id INTEGER PRIMARY KEY)")
+                .execute(&self.pool)
+                .await
+                .ok();
         }
 
         Ok(())
@@ -894,7 +1010,8 @@ impl Database {
 mod tests {
     use super::*;
     use crate::feed::ecosystem::Ecosystem;
-    use crate::output::AnalysisReport;
+use crate::output::AnalysisReport;
+use crate::analysis::compute_static_severity;
 
     #[tokio::test]
     async fn test_database_creation() {

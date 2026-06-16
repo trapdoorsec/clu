@@ -19,7 +19,7 @@ name = "missing_author"
 type = "metadata"
 field = "author"
 check = "is_none"
-risk_score = 30
+risk_score = 5
 description = "Package has no author information"
 
 [[rules]]

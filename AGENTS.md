@@ -152,7 +152,8 @@ CLU processes packages through a configurable pipeline with four analysis stages
 - API endpoints for CRUD, enable/disable, and rule testing
 
 **Stage 4: LLM Analysis** (`src/analysis/llm.rs`)
-- Semantic analysis via Ollama (qwen2.5-coder)
+- Supply-chain malware detection via Ollama (qwen2.5-coder)
+- **NOT a vulnerability scanner** — the LLM is prompted to distinguish intentional malice from normal use of `subprocess`, `eval`, `exec`, etc.
 - Requires package download + Python code extraction
 - Disabled by default (very slow)
 - Includes prompt injection detection sentinel
@@ -238,10 +239,10 @@ is_malicious = static_risk >= 70
 ```
 
 Key implications:
-- `missing_author` (risk_score=30) alone → severity 3 → **IGNORE** (≤4)
+- `missing_author` (risk_score=5) alone → severity 1 → **IGNORE** (≤4)
 - `eval_base64` (risk_score=90) alone → severity 9 → **INSPECT**
 - `dangerous_operations` (risk_score=95) alone → severity 9 → **INSPECT**
-- `missing_author` + `missing_description` (30+35=65) → severity 6 → **INSPECT**
+- `missing_author` + `missing_description` (5+35=40) → severity 4 → **IGNORE** (≤4)
 - typosquat distance 1 (risk_score=90) → severity 9 → **INSPECT**
 
 The LLM can escalate but NEVER de-escalate below the static floor. Final severity = `max(llm.severity, static_severity)`. Final `is_malicious` = `llm.is_malicious() OR static_is_malicious` (where `llm.is_malicious()` = `llm.severity >= 6`).

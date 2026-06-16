@@ -2,6 +2,29 @@ import { useReport } from "@/hooks/queries";
 import { useParams, Link } from "react-router-dom";
 import { formatTime, severityColor, severityLabel, cn } from "@/lib/utils";
 
+function ecosystemLinks(ecosystem: string, name: string): { label: string; url: string }[] {
+  if (ecosystem === "pypi") {
+    return [
+      { label: "PyPI", url: `https://pypi.org/project/${name}/` },
+      { label: "Inspect", url: `https://inspector.pypi.io/project/${name}/` },
+    ];
+  }
+  if (ecosystem === "npm") {
+    return [
+      { label: "npm", url: `https://www.npmjs.com/package/${name}` },
+    ];
+  }
+  return [];
+}
+
+function ExternalLinkIcon() {
+  return (
+    <svg className="inline w-3 h-3 ml-0.5 opacity-50" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 3H3v10h10v-3" /><path d="M9 3h4v4" /><path d="M13 3L7 9" />
+    </svg>
+  );
+}
+
 export default function ReportDetailPage() {
   const { id } = useParams<{ id: string }>();
   const numId = Number(id) || 0;
@@ -15,6 +38,7 @@ export default function ReportDetailPage() {
   }
 
   const r = query.data;
+  const links = ecosystemLinks(r.ecosystem, r.package_name);
 
   return (
     <div className="p-8 max-w-4xl">
@@ -29,11 +53,24 @@ export default function ReportDetailPage() {
         <div className="flex justify-between items-start mb-5">
           <div>
             <h2 className="text-xl font-bold font-mono tracking-tight">{r.package_name}</h2>
-            {r.package_version && (
-              <span className="text-sm text-[var(--color-text-dim)] ml-2">
-                v{r.package_version}
-              </span>
-            )}
+            <div className="flex items-center gap-2 mt-0.5">
+              {r.package_version && (
+                <span className="text-sm text-[var(--color-text-dim)]">
+                  v{r.package_version}
+                </span>
+              )}
+              {links.map((l) => (
+                <a
+                  key={l.label}
+                  href={l.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-[var(--color-primary)] hover:text-[var(--color-primary-hover)] transition-colors"
+                >
+                  {l.label}<ExternalLinkIcon />
+                </a>
+              ))}
+            </div>
           </div>
           <span className={cn("px-2.5 py-1 rounded-md text-sm font-medium border", severityColor(r.severity))}>
             {r.severity} {severityLabel(r.severity)}

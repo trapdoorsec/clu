@@ -101,7 +101,7 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 **Example Rules:**
 - `suspicious_keywords` (75 risk) - detects "eval", "exec", "base64"
 - `eval_base64_found` (90 risk) - specific pattern matching
-- `missing_author` (30 risk) - empty author field
+- `missing_author` (5 risk) - empty author field
 - `ip_address_in_description` (60 risk) - obfuscation indicator
 
 #### **Stage 2: Typosquat Detection** (`typosquat.rs`)
@@ -143,7 +143,7 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 > ```
 
 #### **Stage 4: LLM Analysis** (`llm.rs`)
-- **Type:** Semantic code analysis via LLM
+- **Type:** Supply-chain malware detection via LLM
 - **Speed:** Very slow (~seconds per package)
 - **Default:** Disabled
 - **Inputs:** Extracted Python source code
@@ -156,7 +156,7 @@ The analysis system uses a **4-stage pipeline** with configurable enable/disable
 - Prompt injection detection sentinel (implemented)
 - Downloads package from PyPI, extracts Python source code
 - Sends code to Ollama (qwen2.5-coder model or configured alternative)
-- LLM analyzes for malicious behavior patterns
+- LLM is explicitly prompted to distinguish intentional malice from normal use of `subprocess`, `eval`, `exec`, etc. — it is **not a vulnerability scanner**
 - Detects prompt injection attempts
 - Returns risk score (0-100), reasoning, and confidence
 - Includes `PromptInjectionDetection` struct with evidence
