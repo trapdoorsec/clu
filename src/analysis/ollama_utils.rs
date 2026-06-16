@@ -1,6 +1,17 @@
 use serde_json::json;
 /// Ollama utility functions for checking and pulling models
 use std::error::Error;
+use std::time::Duration;
+
+const OLLAMA_TIMEOUT_SECS: u64 = 30;
+
+fn build_client() -> Result<reqwest::Client, Box<dyn Error>> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(OLLAMA_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client for Ollama: {}", e).into())
+}
 
 /// Check if model is available and optionally pull it
 pub async fn check_model_available(
@@ -14,8 +25,9 @@ pub async fn check_model_available(
         format!("{}/api/tags", url)
     };
 
-    // Check if model exists
-    match reqwest::get(&tags_url).await {
+    let client = build_client()?;
+
+    match client.get(&tags_url).send().await {
         Ok(response) if response.status().is_success() => {
             if let Ok(json) = response.json::<serde_json::Value>().await
                 && let Some(models) = json.get("models").and_then(|v| v.as_array())
@@ -36,17 +48,15 @@ pub async fn check_model_available(
         _ => {}
     }
 
-    // Model not found
     if !auto_pull {
         log::warn!("Ollama: Model '{}' not found at {}", model_name, url);
         eprintln!(
             "       You can pull it with: ollama pull {} (from Ollama service)",
             model_name
         );
-        return Ok(()); // Don't fail
+        return Ok(());
     }
 
-    // Try to auto-pull the model via HTTP API
     log::info!(
         "Ollama: Model '{}' not found, attempting to pull via API...",
         model_name
@@ -63,7 +73,9 @@ pub async fn check_model_available(
         "stream": false
     });
 
-    match reqwest::Client::new()
+    let pull_client = build_client()?;
+
+    match pull_client
         .post(&pull_url)
         .json(&pull_request)
         .send()
@@ -74,8 +86,7 @@ pub async fn check_model_available(
                 "Ollama: Successfully initiated model pull for '{}'",
                 model_name
             );
-            // Wait a moment for the pull to complete
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
             Ok(())
         }
         Ok(response) => {
@@ -85,11 +96,11 @@ pub async fn check_model_available(
                 model_name,
                 status
             );
-            Ok(()) // Don't fail - model might pull in background
+            Ok(())
         }
         Err(e) => {
             log::warn!("Ollama: Could not initiate model pull: {}", e);
-            Ok(()) // Don't fail - user can pull manually or it may retry
+            Ok(())
         }
     }
 }

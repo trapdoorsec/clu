@@ -24,7 +24,7 @@ pub fn compute_static_severity(
     let severity = if static_risk == 0 {
         1u8
     } else {
-        ((static_risk / 10).max(1).min(25)) as u8
+        ((static_risk / 10).clamp(1, 25)) as u8
     };
     let is_malicious = static_risk >= 70;
 

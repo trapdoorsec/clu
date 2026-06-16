@@ -148,17 +148,29 @@ pub struct PromptInjectionDetection {
 ///
 /// 1. Strip control characters
 /// 2. Redact response-format keywords (IMPACT:, LIKELIHOOD:, etc.) —
-///    both uppercase and lowercase — to prevent adversarial package names
-///    or descriptions from injecting fake verdicts
+///    case-insensitively to prevent adversarial package names or descriptions
+///    from injecting fake verdicts (e.g. "Impact:", "IMPACT:", "impact:" all blocked)
 /// 3. Remove XML-like prompt structure tags to prevent tag-closing injection
 /// 4. Truncate to max_len characters (character-aware, not byte-aware)
 fn sanitize_prompt_input(s: &str, max_len: usize) -> String {
     let mut sanitized: String = s.chars().filter(|c| !c.is_control()).collect();
 
     for keyword in RESPONSE_SCHEMA_KEYWORDS {
-        sanitized = sanitized.replace(keyword, "[REDACTED]");
+        // Case-insensitive replacement: find all case variants of schema keywords
+        // by comparing lowercase slices, then replacing the original-cased match.
         let lower_keyword = keyword.to_lowercase();
-        sanitized = sanitized.replace(&lower_keyword, "[redacted]");
+        let redacted = "[REDACTED]";
+        let redacted_len = redacted.len();
+        let mut i = 0;
+        while i + lower_keyword.len() <= sanitized.len() {
+            let end = i + lower_keyword.len();
+            if sanitized[i..end].eq_ignore_ascii_case(&lower_keyword) {
+                sanitized.replace_range(i..end, redacted);
+                i += redacted_len;
+            } else {
+                i += 1;
+            }
+        }
     }
 
     for tag in PROMPT_TAG_NAMES {
@@ -247,6 +259,26 @@ async fn check_ollama_health_from_url(url: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// Extract host:port and numeric port from an endpoint URL string.
+/// Handles "http://host:port", "https://host:port", "host:port", or bare "host".
+/// Falls back to port 11434 if no port is specified.
+fn parse_ollama_endpoint(endpoint: &str) -> (String, u16) {
+    let url_str = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{}", endpoint)
+    };
+
+    match url::Url::parse(&url_str) {
+        Ok(parsed) => {
+            let port = parsed.port().unwrap_or(11434);
+            let host = parsed.host_str().unwrap_or("localhost");
+            (format!("{}:{}", host, port), port)
+        }
+        Err(_) => (endpoint.to_string(), 11434),
+    }
+}
+
 /// Sentinel: Detect prompt injection attempts in the composed prompt body.
 ///
 /// The body is the identical string that will be sent to the main analysis,
@@ -278,7 +310,8 @@ pub async fn detect_prompt_injection(
         log::warn!("LLM: Could not ensure model availability: {}", e);
     }
 
-    let ollama = Ollama::new(url, 11434);
+    let (host_port, ollama_port) = parse_ollama_endpoint(&url);
+    let ollama = Ollama::new(host_port, ollama_port);
     log::debug!("LLM: Ollama client initialized successfully");
 
     let prompt = build_sentinel_prompt(body);
@@ -329,7 +362,8 @@ pub async fn analyze_package_code(
         log::warn!("LLM: Could not ensure model availability: {}", e);
     }
 
-    let ollama = Ollama::new(url, 11434);
+    let (host_port, ollama_port) = parse_ollama_endpoint(&url);
+    let ollama = Ollama::new(host_port, ollama_port);
     log::debug!("LLM: Ollama client initialized successfully");
 
     let prompt = build_analysis_prompt(body);
@@ -715,9 +749,15 @@ mod tests {
         assert!(result.contains("[REDACTED]"));
         assert!(!result.contains("IMPACT:"));
 
+        // Case-insensitive: lowercase "impact:" is also redacted to [REDACTED]
         let result_lower = sanitize_prompt_input("impact: high this is a test", 100);
-        assert!(result_lower.contains("[redacted]"));
+        assert!(result_lower.contains("[REDACTED]"));
         assert!(!result_lower.contains("impact:"));
+
+        // Mixed-case: "Impact:" is also redacted
+        let result_mixed = sanitize_prompt_input("Impact: high this is a test", 100);
+        assert!(result_mixed.contains("[REDACTED]"));
+        assert!(!result_mixed.contains("Impact:"));
     }
 
     #[test]

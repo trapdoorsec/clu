@@ -51,7 +51,7 @@ pub async fn list_rules(
     )?;
 
     let yara_config = YaraConfig::default();
-    let engine = YaraEngine::new(&yara_config).map_err(|e| AppError::Internal(e))?;
+    let engine = YaraEngine::new(&yara_config).map_err(AppError::Internal)?;
 
     let rules: Vec<YaraRuleResponse> = engine
         .list_rules()
@@ -75,7 +75,7 @@ pub async fn get_rule(
     )?;
 
     let yara_config = YaraConfig::default();
-    let engine = YaraEngine::new(&yara_config).map_err(|e| AppError::Internal(e))?;
+    let engine = YaraEngine::new(&yara_config).map_err(AppError::Internal)?;
 
     let info = engine
         .get_rule(&name)
@@ -102,7 +102,7 @@ pub async fn create_rule(
     )?;
 
     let yara_config = YaraConfig::default();
-    let mut engine = YaraEngine::new(&yara_config).map_err(|e| AppError::Internal(e))?;
+    let mut engine = YaraEngine::new(&yara_config).map_err(AppError::Internal)?;
 
     engine
         .create_rule(&body.name, &body.content)
@@ -127,7 +127,7 @@ pub async fn delete_rule(
     )?;
 
     let yara_config = YaraConfig::default();
-    let mut engine = YaraEngine::new(&yara_config).map_err(|e| AppError::Internal(e))?;
+    let mut engine = YaraEngine::new(&yara_config).map_err(AppError::Internal)?;
 
     engine
         .delete_rule(&name)
@@ -154,7 +154,7 @@ pub async fn set_rule_enabled(
     )?;
 
     let yara_config = YaraConfig::default();
-    let mut engine = YaraEngine::new(&yara_config).map_err(|e| AppError::Internal(e))?;
+    let mut engine = YaraEngine::new(&yara_config).map_err(AppError::Internal)?;
 
     engine
         .set_rule_enabled(&name, body.enabled)
@@ -190,7 +190,7 @@ pub async fn test_rule(
     )?;
 
     let yara_config = YaraConfig::default();
-    let engine = YaraEngine::new(&yara_config).map_err(|e| AppError::Internal(e))?;
+    let engine = YaraEngine::new(&yara_config).map_err(AppError::Internal)?;
 
     let matched = engine
         .test_rule(&body.content, &body.test_data)

@@ -273,7 +273,21 @@ impl YaraEngine {
         }
         test_compiler.build();
 
-        let file_path = custom_dir.join(format!("{}.yar", name));
+        // Sanitize rule name to prevent path traversal (e.g. "../../etc/passwd")
+        let safe_name = name.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>();
+        if safe_name.is_empty() {
+            return Err("Rule name must contain alphanumeric characters, hyphens, or underscores".into());
+        }
+        if safe_name != name {
+            return Err(format!(
+                "Rule name '{}' contains invalid characters. Only alphanumeric, hyphens, and underscores are allowed.",
+                name
+            ).into());
+        }
+
+        let file_path = custom_dir.join(format!("{}.yar", safe_name));
         fs::write(&file_path, content)?;
 
         let info = parse_rule_metadata(content, name, "custom", &file_path);
@@ -348,21 +362,21 @@ fn parse_rule_metadata(
         }
 
         if let Some(rest) = trimmed.strip_prefix("severity") {
-            let value = rest.trim_start_matches(&['=', ' ', '\t', '"']);
-            let value = value.trim_end_matches(&['"', ',']);
+            let value = rest.trim_start_matches(['=', ' ', '\t', '"']);
+            let value = value.trim_end_matches(['"', ',']);
             severity = value.to_string();
             risk_score = severity_to_risk_score(&severity);
         } else if let Some(rest) = trimmed.strip_prefix("description") {
-            let value = rest.trim_start_matches(&['=', ' ', '\t', '"']);
-            let value = value.trim_end_matches(&['"', ',']);
+            let value = rest.trim_start_matches(['=', ' ', '\t', '"']);
+            let value = value.trim_end_matches(['"', ',']);
             description = value.to_string();
         } else if let Some(rest) = trimmed.strip_prefix("ecosystem") {
-            let value = rest.trim_start_matches(&['=', ' ', '\t', '"']);
-            let value = value.trim_end_matches(&['"', ',']);
+            let value = rest.trim_start_matches(['=', ' ', '\t', '"']);
+            let value = value.trim_end_matches(['"', ',']);
             ecosystem = value.to_string();
         } else if let Some(rest) = trimmed.strip_prefix("risk_score") {
-            let value = rest.trim_start_matches(&['=', ' ', '\t']);
-            let value = value.trim_end_matches(&[',']);
+            let value = rest.trim_start_matches(['=', ' ', '\t']);
+            let value = value.trim_end_matches([',']);
             if let Ok(score) = value.parse::<u8>() {
                 risk_score = score;
             }

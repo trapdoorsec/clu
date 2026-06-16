@@ -407,7 +407,7 @@ pub async fn run_init(config_path: &str) -> Result<(), Box<dyn std::error::Error
                 .with_prompt(
                     "API Bearer token (clients must send this in the Authorization header)",
                 )
-                .default(format!("clu-{}", rand::random::<u64>().to_string()))
+                .default(format!("clu-{}", rand::random::<u64>()))
                 .interact_text()?;
             Some(tok)
         } else {

@@ -59,7 +59,7 @@ impl PackageStatus {
     }
 
     #[allow(dead_code)]
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    pub fn parse_status(s: &str) -> Result<Self, String> {
         match s {
             "queued" => Ok(PackageStatus::Queued),
             "heuristics" => Ok(PackageStatus::Heuristics),
@@ -458,7 +458,7 @@ impl Database {
             let mut updated = 0u64;
             let mut skipped = 0u64;
 
-            for (row_id, json, old_sev, old_mal, old_rec) in &rows {
+            for (row_id, json, _old_sev, _old_mal, _old_rec) in &rows {
                 match serde_json::from_str::<AnalysisReport>(json) {
                     Ok(mut report) => {
                         let mut changed = false;
@@ -768,7 +768,7 @@ impl Database {
         if let Some(row) = row {
             let status_str: String = row.try_get("status")?;
             let error_msg: Option<String> = row.try_get("error_message")?;
-            let status = PackageStatus::from_str(&status_str)?;
+            let status = PackageStatus::parse_status(&status_str)?;
             Ok(Some((status, error_msg)))
         } else {
             Ok(None)
@@ -796,7 +796,7 @@ impl Database {
             let name: String = row.try_get("package_name")?;
             let status_str: String = row.try_get("status")?;
             let updated_at_str: String = row.try_get("updated_at")?;
-            let status = PackageStatus::from_str(&status_str)?;
+            let status = PackageStatus::parse_status(&status_str)?;
             let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc);
             packages.push((name, status, updated_at));
         }

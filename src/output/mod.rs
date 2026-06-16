@@ -3,7 +3,6 @@
 pub use crate::analysis::heuristics::HeuristicMatch;
 pub use crate::analysis::llm::{LlmAnalysisResult, PromptInjectionDetection};
 pub use crate::analysis::typosquat::TypoSquatterMatch;
-pub use crate::analysis::yara::{YaraEngine, YaraRuleInfo};
 pub use crate::feed::ecosystem::Ecosystem;
 use serde::{Deserialize, Serialize};
 

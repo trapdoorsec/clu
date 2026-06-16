@@ -691,8 +691,57 @@ async fn download_package_fallback_with_config(
     extract_archive_in_memory(&raw_data, &url, config, Ecosystem::PyPI)
 }
 
+/// Maximum download size for package archives (256 MiB).
+/// Prevents memory exhaustion from multi-GB packages or zip bombs.
+const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
+
+/// Download timeout in seconds for package HTTP requests.
+const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
+
+/// Connect timeout in seconds for package HTTP requests.
+const CONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// Trusted PyPI CDN hostnames for download URL validation.
+const TRUSTED_PYPI_HOSTS: &[&str] = &["files.pythonhosted.org", "pypi.org"];
+
+/// Trusted npm registry hostnames for download URL validation.
+const TRUSTED_NPM_HOSTS: &[&str] = &["registry.npmjs.org"];
+
+/// Validate that a download URL points to a trusted package registry.
+/// Prevents SSRF attacks where a compromised mirror redirects to an attacker-controlled server.
+fn validate_download_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("Invalid download URL '{}': {}", url, e))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        return Err(format!("Download URL has invalid scheme '{}': {}", scheme, url).into());
+    }
+
+    let host = parsed.host_str().unwrap_or("");
+    let trusted = TRUSTED_PYPI_HOSTS.iter().chain(TRUSTED_NPM_HOSTS.iter())
+        .any(|&h| host == h || host.ends_with(&format!(".{}", h)));
+
+    if !trusted {
+        return Err(format!(
+            "Download URL host '{}' is not a trusted package registry (expected one of: {})",
+            host,
+            TRUSTED_PYPI_HOSTS.iter().chain(TRUSTED_NPM_HOSTS.iter()).copied().collect::<Vec<_>>().join(", ")
+        ).into());
+    }
+
+    Ok(())
+}
+
 async fn download_bytes(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let response = reqwest::Client::new()
+    // Validate URL origin before downloading
+    validate_download_url(url)?;
+
+    let response = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?
         .get(url)
         .send()
         .await
@@ -707,7 +756,27 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>
         .into());
     }
 
+    let content_length = response.content_length().unwrap_or(0) as usize;
+    if content_length > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "Package too large: {} bytes (limit {} bytes) at {}",
+            content_length,
+            MAX_DOWNLOAD_BYTES,
+            url
+        )
+        .into());
+    }
+
     let bytes = response.bytes().await?;
+    if bytes.len() > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "Package too large: {} bytes (limit {} bytes)",
+            bytes.len(),
+            MAX_DOWNLOAD_BYTES
+        )
+        .into());
+    }
+
     Ok(bytes.to_vec())
 }
 
