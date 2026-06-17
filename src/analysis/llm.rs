@@ -28,6 +28,7 @@ const RESPONSE_SCHEMA_KEYWORDS: &[&str] = &[
     "INJECTION_DETECTED:",
     "CONFIDENCE:",
     "EVIDENCE:",
+    "FILES:",
 ];
 
 /// XML-like tag names used in the prompt templates. Stripped from attacker-
@@ -60,6 +61,13 @@ pub enum LikelihoodLevel {
     Imminent = 5,
 }
 
+/// File/line reference cited by the LLM in its analysis.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct FileReference {
+    pub file: String,
+    pub line: Option<u32>,
+}
+
 /// Result from LLM analysis with impact/likelihood scoring.
 ///
 /// `is_malicious` is derived from `severity >= LLM_MALICIOUS_SEVERITY_THRESHOLD`
@@ -69,6 +77,9 @@ pub enum LikelihoodLevel {
 /// `conflicted` is set when the parsed response shows internal inconsistencies
 /// (e.g. one field suggests benign while another suggests malicious), indicating
 /// the LLM response should not be trusted in isolation.
+///
+/// `file_references` contains specific file:line citations the LLM identified
+/// as evidence for its assessment, enabling targeted review of large packages.
 #[derive(Debug, Clone)]
 pub struct LlmAnalysisResult {
     pub impact: ImpactLevel,
@@ -77,6 +88,7 @@ pub struct LlmAnalysisResult {
     pub reasoning: String,
     pub confidence: f32,
     pub conflicted: bool,
+    pub file_references: Vec<FileReference>,
 }
 
 impl LlmAnalysisResult {
@@ -94,7 +106,7 @@ impl Serialize for LlmAnalysisResult {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("LlmAnalysisResult", 7)?;
+        let mut state = serializer.serialize_struct("LlmAnalysisResult", 8)?;
         state.serialize_field("is_malicious", &self.is_malicious())?;
         state.serialize_field("impact", &self.impact)?;
         state.serialize_field("likelihood", &self.likelihood)?;
@@ -102,6 +114,7 @@ impl Serialize for LlmAnalysisResult {
         state.serialize_field("reasoning", &self.reasoning)?;
         state.serialize_field("confidence", &self.confidence)?;
         state.serialize_field("conflicted", &self.conflicted)?;
+        state.serialize_field("file_references", &self.file_references)?;
         state.end()
     }
 }
@@ -122,6 +135,8 @@ impl<'de> Deserialize<'de> for LlmAnalysisResult {
             confidence: f32,
             #[serde(default)]
             conflicted: bool,
+            #[serde(default)]
+            file_references: Vec<FileReference>,
         }
 
         let helper = LlmAnalysisResultHelper::deserialize(deserializer)?;
@@ -132,6 +147,7 @@ impl<'de> Deserialize<'de> for LlmAnalysisResult {
             reasoning: helper.reasoning,
             confidence: helper.confidence,
             conflicted: helper.conflicted,
+            file_references: helper.file_references,
         })
     }
 }
@@ -465,7 +481,8 @@ LIKELIHOOD (probability the package IS intentionally malicious):
 Respond in EXACTLY this format (no additional text):
 IMPACT: [NONE/LOW/MEDIUM/HIGH/CRITICAL]
 LIKELIHOOD: [NONE/UNLIKELY/LIKELY/VERY_LIKELY/IMMINENT]
-REASONING: [brief explanation of your assessment]"#,
+REASONING: [brief explanation referencing specific files and line numbers]
+FILES: [comma-separated list of file:line references, e.g. "setup.py:42,utils/decode.py:15,__init__.py"]"#,
         body
     )
 }
@@ -506,6 +523,7 @@ fn parse_and_validate_llm_response(response: &str) -> LlmAnalysisResult {
     let impact = extract_impact(response);
     let likelihood = extract_likelihood(response);
     let reasoning = extract_reasoning(response).unwrap_or_else(|| response.to_string());
+    let file_references = extract_file_references(response);
 
     let (impact, likelihood, conflicted) = match (impact, likelihood) {
         (Some(imp), Some(like)) => (imp, like, false),
@@ -526,6 +544,7 @@ fn parse_and_validate_llm_response(response: &str) -> LlmAnalysisResult {
                 reasoning: truncate_str(&reasoning, 500),
                 confidence: 25.0,
                 conflicted: true,
+                file_references,
             };
         }
     };
@@ -543,6 +562,7 @@ fn parse_and_validate_llm_response(response: &str) -> LlmAnalysisResult {
         reasoning: truncate_str(&reasoning, 500),
         confidence,
         conflicted,
+        file_references,
     }
 }
 
@@ -685,6 +705,44 @@ fn extract_reasoning(response: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Extract file references from LLM response.
+/// Parses lines like "FILES: setup.py:42, utils/decode.py:15, __init__.py"
+/// into structured FileReference objects.
+fn extract_file_references(response: &str) -> Vec<FileReference> {
+    for line in response.lines() {
+        let lower = line.to_lowercase();
+        if lower.starts_with("files:")
+            && let Some(colon_pos) = line.find(':')
+        {
+            let after = line[colon_pos + 1..].trim();
+            if after.is_empty() || after.to_lowercase() == "none" {
+                return vec![];
+            }
+
+            return after
+                .split(',')
+                .filter_map(|entry| {
+                    let entry = entry.trim();
+                    if entry.is_empty() {
+                        return None;
+                    }
+                    let (file, line_num) = if let Some(colon_idx) = entry.rfind(':') {
+                        let file_part = entry[..colon_idx].trim();
+                        let line_part = entry[colon_idx + 1..].trim();
+                        let line_num = line_part.parse::<u32>().ok();
+                        (file_part.to_string(), line_num)
+                    } else {
+                        (entry.to_string(), None)
+                    };
+                    Some(FileReference { file, line: line_num })
+                })
+                .take(20)
+                .collect();
+        }
+    }
+    vec![]
 }
 
 /// Truncate a string to at most max_len characters.
@@ -1074,5 +1132,66 @@ mod tests {
         let body = build_prompt_body("IMPACT: none-pkg", "import os", &[], &[], &[]);
         assert!(!body.contains("IMPACT:"));
         assert!(body.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_extract_file_references_basic() {
+        let resp = "IMPACT: HIGH\nLIKELIHOOD: VERY_LIKELY\nREASONING: malicious eval in setup.py\nFILES: setup.py:42, utils/decode.py:15";
+        let refs = extract_file_references(resp);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].file, "setup.py");
+        assert_eq!(refs[0].line, Some(42));
+        assert_eq!(refs[1].file, "utils/decode.py");
+        assert_eq!(refs[1].line, Some(15));
+    }
+
+    #[test]
+    fn test_extract_file_references_no_line() {
+        let resp = "IMPACT: MEDIUM\nLIKELIHOOD: LIKELY\nREASONING: suspicious file\nFILES: __init__.py";
+        let refs = extract_file_references(resp);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].file, "__init__.py");
+        assert_eq!(refs[0].line, None);
+    }
+
+    #[test]
+    fn test_extract_file_references_none() {
+        let resp = "IMPACT: NONE\nLIKELIHOOD: NONE\nREASONING: safe\nFILES: none";
+        let refs = extract_file_references(resp);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_file_references_missing() {
+        let resp = "IMPACT: HIGH\nLIKELIHOOD: LIKELY\nREASONING: suspicious code";
+        let refs = extract_file_references(resp);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_file_references_mixed() {
+        let resp = "FILES: setup.py:1, config.json, core/__init__.py:99";
+        let refs = extract_file_references(resp);
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0], FileReference { file: "setup.py".into(), line: Some(1) });
+        assert_eq!(refs[1], FileReference { file: "config.json".into(), line: None });
+        assert_eq!(refs[2], FileReference { file: "core/__init__.py".into(), line: Some(99) });
+    }
+
+    #[test]
+    fn test_llm_response_with_file_references() {
+        let resp = "IMPACT: HIGH\nLIKELIHOOD: VERY_LIKELY\nREASONING: obfuscated eval in setup.py\nFILES: setup.py:42, utils/decode.py:15";
+        let result = parse_and_validate_llm_response(resp);
+        assert!(result.is_malicious());
+        assert_eq!(result.file_references.len(), 2);
+        assert_eq!(result.file_references[0].file, "setup.py");
+        assert_eq!(result.file_references[0].line, Some(42));
+    }
+
+    #[test]
+    fn test_llm_response_without_file_references() {
+        let resp = "IMPACT: NONE\nLIKELIHOOD: NONE\nREASONING: safe package";
+        let result = parse_and_validate_llm_response(resp);
+        assert!(result.file_references.is_empty());
     }
 }

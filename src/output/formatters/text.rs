@@ -46,10 +46,18 @@ impl Formatter for TextFormatter {
         {
             for finding in &yara.findings {
                 findings_count += 1;
+                let location = if finding.file.is_empty() {
+                    String::new()
+                } else {
+                    format!(" in {}", finding.file)
+                };
                 output.push_str(&format!(
-                    "  YARA: {} [{}] - {}\n",
-                    finding.rule_name, finding.severity, finding.description
+                    "  YARA: {}{} [{}] - {}\n",
+                    finding.rule_name, location, finding.severity, finding.description
                 ));
+                for sm in &finding.strings_matched {
+                    output.push_str(&format!("    {}\n", sm));
+                }
             }
         }
 
@@ -62,6 +70,15 @@ impl Formatter for TextFormatter {
                 "  LLM: MALICIOUS{} - {}\n",
                 conflicted_marker, llm.reasoning
             ));
+            if !llm.file_references.is_empty() {
+                let refs: Vec<String> = llm.file_references.iter().map(|r| {
+                    match r.line {
+                        Some(ln) => format!("{}:{}", r.file, ln),
+                        None => r.file.clone(),
+                    }
+                }).collect();
+                output.push_str(&format!("    Key files: {}\n", refs.join(", ")));
+            }
         }
 
         if findings_count == 0 {

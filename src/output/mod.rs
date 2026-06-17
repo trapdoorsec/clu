@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 pub use crate::analysis::heuristics::HeuristicMatch;
-pub use crate::analysis::llm::{LlmAnalysisResult, PromptInjectionDetection};
+pub use crate::analysis::llm::{FileReference, LlmAnalysisResult, PromptInjectionDetection};
 pub use crate::analysis::typosquat::TypoSquatterMatch;
 pub use crate::feed::ecosystem::Ecosystem;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,8 @@ pub mod webhook;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YaraMatch {
     pub rule_name: String,
+    #[serde(default)]
+    pub file: String,
     pub severity: String,
     pub description: String,
     pub risk_score: u8,

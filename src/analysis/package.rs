@@ -523,14 +523,28 @@ fn extract_region(content: &str, start: usize, max_len: usize) -> String {
 pub fn format_source_bundle(bundle: &SourceBundle) -> String {
     let mut out = String::new();
     for entry in &bundle.entries {
+        let numbered = add_line_numbers(&entry.contents);
         out.push_str(&format!(
             "\n# File: {} [{}]\n{}\n",
             entry.path.display(),
             entry.role_tag,
-            entry.contents
+            numbered
         ));
     }
     out
+}
+
+fn add_line_numbers(content: &str) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+    let width = content.lines().count().to_string().len().max(1);
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| format!("{:>width$} | {}", i + 1, line, width = width))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── Downloaded package with raw bytes preserved ──────────────────────────
@@ -1080,5 +1094,52 @@ mod tests {
         assert_eq!(config.max_total_bytes, 67_108_864);
         assert_eq!(config.max_file_bytes, 2_097_152);
         assert_eq!(config.max_entries, 5000);
+    }
+
+    #[test]
+    fn test_add_line_numbers() {
+        let content = "import os\nimport sys\nprint('hello')";
+        let result = add_line_numbers(content);
+        assert!(result.contains("1 | import os"));
+        assert!(result.contains("2 | import sys"));
+        assert!(result.contains("3 | print('hello')"));
+    }
+
+    #[test]
+    fn test_add_line_numbers_single_line() {
+        let result = add_line_numbers("hello");
+        assert_eq!(result, "1 | hello");
+    }
+
+    #[test]
+    fn test_add_line_numbers_empty() {
+        let result = add_line_numbers("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_add_line_numbers_width_alignment() {
+        let content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10";
+        let result = add_line_numbers(content);
+        // 10 lines → width=2, so single-digit lines are right-aligned
+        assert!(result.contains(" 1 | line1"));
+        assert!(result.contains("10 | line10"));
+    }
+
+    #[test]
+    fn test_format_source_bundle_has_line_numbers() {
+        let bundle = SourceBundle {
+            entries: vec![BundleEntry {
+                path: PathBuf::from("setup.py"),
+                role_tag: "entry-script".to_string(),
+                contents: "from setuptools import setup\nsetup()".to_string(),
+            }],
+            total_bytes: 42,
+            truncated: false,
+        };
+        let result = format_source_bundle(&bundle);
+        assert!(result.contains("# File: setup.py [entry-script]"));
+        assert!(result.contains("1 | from setuptools import setup"));
+        assert!(result.contains("2 | setup()"));
     }
 }

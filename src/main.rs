@@ -961,7 +961,14 @@ async fn run_llm_stage(
             .map(|y| {
                 y.findings
                     .iter()
-                    .map(|f| format!("{} [{}]: {}", f.rule_name, f.severity, f.description))
+                    .map(|f| {
+                        let location = if f.file.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" in {}", f.file)
+                        };
+                        format!("{}{} [{}]: {}", f.rule_name, location, f.severity, f.description)
+                    })
                     .collect()
             })
             .unwrap_or_default();

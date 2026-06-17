@@ -192,6 +192,7 @@ fn test_db_migration_guarddog_to_yara() {
                 risk_score: 80,
                 findings: vec![clu::output::YaraMatch {
                     rule_name: "test_rule".to_string(),
+                    file: "setup.py".to_string(),
                     severity: "critical".to_string(),
                     description: "Test finding".to_string(),
                     risk_score: 80,

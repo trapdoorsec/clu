@@ -61,7 +61,7 @@ impl Formatter for ColouredTextFormatter {
             }
         }
 
-        // YARA - compact
+        // YARA - compact with file locations
         if let Some(yara) = &report.yara_result
             && !yara.findings.is_empty()
         {
@@ -73,16 +73,25 @@ impl Formatter for ColouredTextFormatter {
                     "medium" => "🟡",
                     _ => "⚠",
                 };
+                let location = if finding.file.is_empty() {
+                    String::new()
+                } else {
+                    format!(" in {}", finding.file.cyan())
+                };
                 output.push_str(&format!(
-                    "  {} {} - {}\n",
+                    "  {} {}{} - {}\n",
                     severity_icon,
                     finding.rule_name.bright_white(),
+                    location,
                     finding.description.dimmed()
                 ));
+                for sm in &finding.strings_matched {
+                    output.push_str(&format!("    {}\n", sm.yellow()));
+                }
             }
         }
 
-        // LLM - compact
+        // LLM - compact with file references
         if let Some(llm) = &report.llm_analysis
             && llm.is_malicious()
         {
@@ -94,6 +103,15 @@ impl Formatter for ColouredTextFormatter {
                 conflicted_label.red(),
                 llm.reasoning.dimmed()
             ));
+            if !llm.file_references.is_empty() {
+                let refs: Vec<String> = llm.file_references.iter().map(|r| {
+                    match r.line {
+                        Some(ln) => format!("{}:{}", r.file, ln),
+                        None => r.file.clone(),
+                    }
+                }).collect();
+                output.push_str(&format!("    Key files: {}\n", refs.join(", ").cyan()));
+            }
         }
 
         // If no findings, say so

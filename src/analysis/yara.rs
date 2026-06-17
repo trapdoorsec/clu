@@ -221,13 +221,20 @@ impl YaraEngine {
                     .patterns()
                     .flat_map(|p| {
                         p.matches()
-                            .map(|m| format!("{} at offset {}", p.identifier(), m.range().start))
+                            .map(|m| {
+                                let line = byte_offset_to_line(file_content, m.range().start);
+                                match line {
+                                    Some(ln) => format!("{} at line {}", p.identifier(), ln),
+                                    None => format!("{} at offset {}", p.identifier(), m.range().start),
+                                }
+                            })
                             .collect::<Vec<_>>()
                     })
                     .collect();
 
                 all_findings.push(crate::output::YaraMatch {
                     rule_name: rule_name.clone(),
+                    file: file_path.clone(),
                     severity: severity.clone(),
                     description: description.clone(),
                     risk_score,
@@ -413,6 +420,15 @@ fn calculate_yara_risk_score(findings: &[crate::output::YaraMatch]) -> u8 {
     score.min(100)
 }
 
+/// Convert a byte offset in a string to a 1-based line number.
+fn byte_offset_to_line(content: &str, byte_offset: usize) -> Option<u32> {
+    if byte_offset > content.len() {
+        return None;
+    }
+    let line_num = content[..byte_offset].chars().filter(|&c| c == '\n').count() as u32 + 1;
+    Some(line_num)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +452,7 @@ mod tests {
     fn test_calculate_yara_risk_score_single_critical() {
         let findings = vec![crate::output::YaraMatch {
             rule_name: "exec_base64".to_string(),
+            file: "setup.py".to_string(),
             severity: "critical".to_string(),
             description: "test".to_string(),
             risk_score: 95,
@@ -449,6 +466,7 @@ mod tests {
         let findings = vec![
             crate::output::YaraMatch {
                 rule_name: "exec_base64".to_string(),
+                file: "setup.py".to_string(),
                 severity: "critical".to_string(),
                 description: "test".to_string(),
                 risk_score: 30,
@@ -456,6 +474,7 @@ mod tests {
             },
             crate::output::YaraMatch {
                 rule_name: "obfuscation".to_string(),
+                file: "utils.py".to_string(),
                 severity: "high".to_string(),
                 description: "test".to_string(),
                 risk_score: 20,
@@ -470,6 +489,7 @@ mod tests {
         let findings: Vec<crate::output::YaraMatch> = (0..5)
             .map(|_| crate::output::YaraMatch {
                 rule_name: "test".to_string(),
+                file: "test.py".to_string(),
                 severity: "critical".to_string(),
                 description: "test".to_string(),
                 risk_score: 30,
@@ -527,5 +547,29 @@ rule minimal_rule
         assert_eq!(info.severity, "medium");
         assert_eq!(info.ecosystem, "all");
         assert_eq!(info.risk_score, 10);
+    }
+
+    #[test]
+    fn test_byte_offset_to_line() {
+        let content = "line1\nline2\nline3\nline4";
+        assert_eq!(byte_offset_to_line(content, 0), Some(1)); // start of line 1
+        assert_eq!(byte_offset_to_line(content, 6), Some(2)); // start of line 2
+        assert_eq!(byte_offset_to_line(content, 12), Some(3)); // start of line 3
+        assert_eq!(byte_offset_to_line(content, 18), Some(4)); // start of line 4
+        assert_eq!(byte_offset_to_line(content, 3), Some(1)); // mid-line 1
+        assert_eq!(byte_offset_to_line(content, 100), None); // past end
+    }
+
+    #[test]
+    fn test_byte_offset_to_line_single_line() {
+        let content = "hello world";
+        assert_eq!(byte_offset_to_line(content, 0), Some(1));
+        assert_eq!(byte_offset_to_line(content, 5), Some(1));
+    }
+
+    #[test]
+    fn test_byte_offset_to_line_empty() {
+        assert_eq!(byte_offset_to_line("", 0), Some(1));
+        assert_eq!(byte_offset_to_line("", 1), None);
     }
 }
